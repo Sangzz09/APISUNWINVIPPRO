@@ -17,7 +17,6 @@ const PORT = process.env.PORT || 3000;
 const SOURCE_API = 'https://apisunw-wspro.onrender.com/';
 
 // ─── In-memory store ─────────────────────────────────────────
-// { phien: string, ket_qua: 'T'|'X', xuc_xac: number[], tong: number }
 let history    = [];   // rolling 200 phiên
 let winLoss    = [];   // { phien, du_doan, ket_qua_thuc, win }
 
@@ -30,38 +29,31 @@ const label  = t => isTai(t) ? 'T' : 'X';
 const fullLabel = t => isTai(t) ? 'Tài' : 'Xỉu';
 
 // ─────────────────────────────────────────────────────────────
-//  CÔNG THỨC 68GB  (returns { du_doan, rule, mo_ta })
+//  CÔNG THỨC 68GB
 // ─────────────────────────────────────────────────────────────
 function apply68GB(totals) {
-  // totals = [..., t-3, t-2, t-1, t]  (t là mới nhất)
   const n = totals.length;
   if (n < 2) return null;
 
-  const t0 = totals[n - 1]; // newest
+  const t0 = totals[n - 1];
   const t1 = totals[n - 2];
   const t2 = n >= 3 ? totals[n - 3] : null;
   const t3 = n >= 4 ? totals[n - 4] : null;
 
-  // ── QUY TẮC 1 ────────────────────────────────────────────
-  // 1.1 Bộ 3 Xỉu Chẵn
   if (n >= 3 && t0 === t1 && t1 === t2 && isXiu(t0) && isChan(t0)) {
     if (t0 === 10) return { du_doan: 'Xỉu', rule: '1.1-NL', mo_ta: 'CT68 R1.1 Ngoại lệ 10-10-10 → Tiếp Xỉu' };
     return { du_doan: 'Tài', rule: '1.1', mo_ta: `CT68 R1.1 Bộ 3 Xỉu Chẵn ${t0}-${t0}-${t0} → Bẻ Tài` };
   }
-  // 1.2 Bộ 3 Xỉu Lẻ
   if (n >= 3 && t0 === t1 && t1 === t2 && isXiu(t0) && isLe(t0)) {
     return { du_doan: 'Xỉu', rule: '1.2', mo_ta: `CT68 R1.2 Bộ 3 Xỉu Lẻ ${t0}-${t0}-${t0} → Tiếp Xỉu` };
   }
-  // 1.3 Max Tài
   if (t0 === 16 || t0 === 17) {
     return { du_doan: 'Xỉu', rule: '1.3', mo_ta: `CT68 R1.3 Max Tài (${t0}) → Bẻ Xỉu` };
   }
-  // 1.4 Kép 11 sau bệt Xỉu
   if (n >= 4 && t0 === 11 && t1 === 11 && isXiu(t2) && isXiu(t3)) {
     return { du_doan: 'Tài', rule: '1.4', mo_ta: `CT68 R1.4 Kép 11 sau bệt Xỉu → Tiếp Tài` };
   }
 
-  // ── QUY TẮC 2 ────────────────────────────────────────────
   if (t0 === t1) {
     if (isXiu(t0) && isChan(t0))
       return { du_doan: 'Xỉu', rule: '2.1', mo_ta: `CT68 R2.1 Kép Xỉu Chẵn ${t0}-${t0} → Tiếp Xỉu` };
@@ -73,14 +65,12 @@ function apply68GB(totals) {
       return { du_doan: 'Tài', rule: '2.4', mo_ta: `CT68 R2.4 Kép Tài Lẻ ${t0}-${t0} → Tiếp Tài` };
   }
 
-  // ── QUY TẮC 3 ────────────────────────────────────────────
   if (n >= 5) {
     const last5 = totals.slice(n - 5);
     const allSame = last5.every(v => label(v) === label(last5[0]));
     if (allSame)
       return { du_doan: isTai(t0) ? 'Xỉu' : 'Tài', rule: '3.1', mo_ta: `CT68 R3.1 Bệt 5 ${label(t0)} → Bẻ` };
   }
-  // 3.2 Bệt suy yếu
   if (n >= 3) {
     let bietLen = 0, bietStart = null;
     for (let i = n - 1; i >= 0; i--) {
@@ -91,57 +81,43 @@ function apply68GB(totals) {
       return { du_doan: isTai(t0) ? 'Xỉu' : 'Tài', rule: '3.2', mo_ta: `CT68 R3.2 Bệt suy yếu (${bietLen} tay) → Bẻ` };
   }
 
-  // ── QUY TẮC 4 ────────────────────────────────────────────
   if (n >= 3) {
-    // 4.1 X-T-X hai X giống nhau
     if (isXiu(t0) && isTai(t1) && isXiu(t2) && t0 === t2)
       return { du_doan: 'Tài', rule: '4.1', mo_ta: `CT68 R4.1 Cầu 1-1 đặc biệt ${t2}-${t1}-${t0} → Bệt Tài 3 tay` };
-    // 4.2 X lớn hơn X sau (X-T-X')
     if (isXiu(t0) && isTai(t1) && isXiu(t2) && t2 > t0)
       return { du_doan: 'Xỉu', rule: '4.2', mo_ta: `CT68 R4.2 Phá cầu 1-1 (${t2}-${t1}-${t0}) → Bẻ Xỉu` };
-    // 4.3 Nhỏ-Cao-Nhỏ
     if (isXiu(t0) && isTai(t1) && isXiu(t2))
       return { du_doan: 'Tài', rule: '4.3', mo_ta: `CT68 R4.3 Tạo cầu 1-1 → Bẻ lên Tài` };
   }
 
-  // ── QUY TẮC 5 ────────────────────────────────────────────
   if (isXiu(t0) && isXiu(t1)) {
-    // 5.1 Chẵn Lẻ xen
     if (isChan(t0) !== isChan(t1))
       return { du_doan: 'Tài', rule: '5.1', mo_ta: `CT68 R5.1 2 Xỉu Chẵn/Lẻ xen (${t1}-${t0}) → Bẻ Tài` };
-    // 5.2 Xỉu đi lùi
     if (t0 < t1)
       return { du_doan: 'Xỉu', rule: '5.2', mo_ta: `CT68 R5.2 Xỉu lùi (${t1}→${t0}) → Tiếp Xỉu` };
   }
 
-  // ── QUY TẮC 6 ────────────────────────────────────────────
   if (isTai(t0) && isTai(t1)) {
     const diff = t0 - t1;
-    // 6.1 Tài lùi
     if (diff < 0)
       return { du_doan: 'Xỉu', rule: '6.1', mo_ta: `CT68 R6.1 Tài lùi (${t1}→${t0}) → Bẻ Xỉu` };
-    // 6.3 Tài tiến liền kề
     if (diff === 1) {
-      // Ngoại lệ 6.3: zíc zắc t2===t0
       if (t2 !== null && t2 === t0)
         return { du_doan: 'Tài', rule: '6.3-NL', mo_ta: `CT68 R6.3 NL Zíc zắc (${t2}-${t1}-${t0}) → Theo 2 Tài` };
       return { du_doan: 'Xỉu', rule: '6.3', mo_ta: `CT68 R6.3 Tài tiến liền kề (${t1}→${t0}) → Bẻ Xỉu` };
     }
-    // 6.2 Tài tiến mạnh
     if (diff >= 2)
       return { du_doan: 'Tài', rule: '6.2', mo_ta: `CT68 R6.2 Tài tiến mạnh (${t1}→${t0}) → Tiếp Tài` };
   }
 
-  return null; // không khớp
+  return null;
 }
 
 // ─────────────────────────────────────────────────────────────
 //  MARKOV CHAIN BẬC 1-2-3
 // ─────────────────────────────────────────────────────────────
 function buildMarkov(seq) {
-  // seq: mảng 'T'/'X'
   const m = { order1: {}, order2: {}, order3: {} };
-
   for (let i = 1; i < seq.length; i++) {
     const k1 = seq[i - 1];
     m.order1[k1] = m.order1[k1] || { T: 0, X: 0 };
@@ -166,21 +142,18 @@ function markovPredict(seq) {
   const n = seq.length;
   const scores = { T: 0, X: 0 };
 
-  // Bậc 3 (trọng số 3)
   const k3 = seq[n - 3] + seq[n - 2] + seq[n - 1];
   if (m.order3[k3]) {
     const { T = 0, X = 0 } = m.order3[k3];
     const tot = T + X;
     if (tot > 0) { scores.T += 3 * T / tot; scores.X += 3 * X / tot; }
   }
-  // Bậc 2 (trọng số 2)
   const k2 = seq[n - 2] + seq[n - 1];
   if (m.order2[k2]) {
     const { T = 0, X = 0 } = m.order2[k2];
     const tot = T + X;
     if (tot > 0) { scores.T += 2 * T / tot; scores.X += 2 * X / tot; }
   }
-  // Bậc 1 (trọng số 1)
   const k1 = seq[n - 1];
   if (m.order1[k1]) {
     const { T = 0, X = 0 } = m.order1[k1];
@@ -196,7 +169,7 @@ function markovPredict(seq) {
 }
 
 // ─────────────────────────────────────────────────────────────
-//  KẾT HỢP: 68GB + MARKOV  →  final prediction
+//  KẾT HỢP: 68GB + MARKOV
 // ─────────────────────────────────────────────────────────────
 function combinePrediction(totals) {
   if (totals.length < 2) return { du_doan: 'Tài', do_tin_cay: 50, method: 'default' };
@@ -209,12 +182,10 @@ function combinePrediction(totals) {
   if (!r68) return { ...mrk, rule: 'Markov', mo_ta: `Markov Bậc 1-2-3 → ${mrk.du_doan}`, method: 'markov' };
   if (!mrk) return { ...r68, do_tin_cay: 65, method: '68gb' };
 
-  // Nếu cùng dự đoán → tăng độ tin cậy
   if (r68.du_doan === mrk.du_doan) {
     const conf = Math.min(95, Math.round((mrk.do_tin_cay + 75) / 2) + 10);
     return { du_doan: r68.du_doan, do_tin_cay: conf, rule: r68.rule, mo_ta: r68.mo_ta + ' | Markov đồng thuận', method: 'combo' };
   }
-  // Khác nhau → 68GB ưu tiên nhưng giảm confidence
   const conf = Math.max(55, Math.round(mrk.do_tin_cay * 0.4 + 60 * 0.6));
   return { du_doan: r68.du_doan, do_tin_cay: conf, rule: r68.rule, mo_ta: r68.mo_ta + ' | Markov bất đồng', method: '68gb-priority' };
 }
@@ -223,7 +194,7 @@ function combinePrediction(totals) {
 //  FETCH dữ liệu nguồn & cập nhật history
 // ─────────────────────────────────────────────────────────────
 let lastPhien = null;
-let pendingPrediction = null; // { phien_du_doan, du_doan, do_tin_cay, ... }
+let pendingPrediction = null;
 
 async function fetchAndUpdate() {
   try {
@@ -231,16 +202,13 @@ async function fetchAndUpdate() {
     const data = await res.json();
 
     const phien   = String(data.phien);
-    const xucXac  = data.xuc_xac || [];
-    const tong    = xucXac.reduce((a, b) => a + b, 0);
+    const xucXac  = data.xuc_xac || null;
+    const tong    = Array.isArray(xucXac) ? xucXac.reduce((a, b) => a + b, 0) : 0;
 
-    // Phiên mới → ghi kết quả thực tế
     if (lastPhien && phien !== lastPhien) {
-      // Ghi kết quả cho phiên vừa kết thúc
       history.push({ phien, xuc_xac: xucXac, tong, ket_qua: label(tong) });
       if (history.length > 200) history.shift();
 
-      // Kiểm tra dự đoán pending
       if (pendingPrediction && String(pendingPrediction.phien_du_doan) === phien) {
         const win = pendingPrediction.du_doan_raw === label(tong);
         winLoss.push({
@@ -256,10 +224,9 @@ async function fetchAndUpdate() {
 
     lastPhien = phien;
 
-    // Tạo dự đoán cho phiên tiếp theo
     const totals  = history.map(h => h.tong);
     const predict = combinePrediction(totals);
-    const pattern = history.slice(-25).map(h => h.ket_qua).join('');
+    const pattern = history.slice(-25).map(h => h.ket_qua).join('').toLowerCase();
     const phienNext = String(Number(data.phien_hien_tai));
 
     pendingPrediction = {
@@ -272,18 +239,14 @@ async function fetchAndUpdate() {
       method:        predict.method
     };
 
+    // ── Chỉ trả về các field yêu cầu ──
     return {
       phien_hien_tai: Number(data.phien_hien_tai),
-      phien_da_chot:  Number(phien),
       ket_qua:        fullLabel(tong),
       xuc_xac:        xucXac,
-      tong,
       phien_du_doan:  Number(phienNext),
       du_doan:        predict.du_doan,
       do_tin_cay:     predict.do_tin_cay + '%',
-      rule:           predict.rule  || 'default',
-      mo_ta:          predict.mo_ta || 'Không đủ dữ liệu',
-      method:         predict.method,
       pattern:        pattern || (data.pattern || ''),
       id:             '@sewdangcap'
     };
@@ -312,7 +275,7 @@ app.use(cors());
 app.use(express.json());
 
 // ─────────────────────────────────────────────────────────────
-//  HOME  —  HTML điều hướng
+//  HOME  —  HTML điều hướng (ĐÃ CẬP NHẬT TITLE)
 // ─────────────────────────────────────────────────────────────
 app.get('/', (req, res) => {
   res.send(`<!DOCTYPE html>
@@ -320,7 +283,7 @@ app.get('/', (req, res) => {
 <head>
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1"/>
-<title>SicBo API — DEV @sewdangcap</title>
+<title>API Tool Tài Xỉu Sunwin — DEV @sewdangcap</title>
 <style>
   *{box-sizing:border-box;margin:0;padding:0}
   body{background:#0d1117;color:#e6edf3;font-family:'Segoe UI',sans-serif;min-height:100vh;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:24px}
@@ -336,8 +299,8 @@ app.get('/', (req, res) => {
 </style>
 </head>
 <body>
-<h1>🎲 SicBo Prediction API</h1>
-<p class="sub">Powered by Công Thức 68GB + Markov Chain Bậc 1-2-3 &nbsp;|&nbsp; DEV @sewdangcap</p>
+<h1>API Tool Tài Xỉu Sunwin</h1>
+<p class="sub">Được dev bởi @sewdangcap</p>
 <div class="grid">
   <a class="card" href="/sunlon">
     <span class="badge">JSON</span>
@@ -361,16 +324,12 @@ app.get('/', (req, res) => {
   </a>
 </div>
 <footer>© 2025 DEV @sewdangcap — All rights reserved</footer>
-<script>
-  // tự chuyển sau 3s nếu muốn — disabled mặc định
-  // setTimeout(() => window.location.href = '/sunlon', 3000);
-</script>
 </body>
 </html>`);
 });
 
 // ─────────────────────────────────────────────────────────────
-//  /sunlon  —  JSON dự đoán chính
+//  /sunlon  —  JSON dự đoán chính (fields tinh gọn)
 // ─────────────────────────────────────────────────────────────
 app.get('/sunlon', async (req, res) => {
   if (!latestData) {
@@ -393,7 +352,7 @@ app.get('/history', (req, res) => {
     ket_qua:  h.ket_qua === 'T' ? 'Tài' : 'Xỉu'
   }));
   res.json({
-    total:   history.length,
+    total:    history.length,
     hien_thi: data.length,
     data,
     id: '@sewdangcap'
@@ -411,16 +370,16 @@ app.get('/thangthua', (req, res) => {
   const rate  = slice.length ? Math.round(wins / slice.length * 100) : 0;
 
   res.json({
-    tong_phien:  slice.length,
-    win:         wins,
-    lose:        loses,
-    win_rate:    rate + '%',
-    chi_tiet:    slice.map(r => ({
-      phien:         r.phien,
-      du_doan:       r.du_doan,
-      ket_qua_thuc:  r.ket_qua_thuc,
-      do_tin_cay:    r.do_tin_cay + '%',
-      ket_luan:      r.win ? '✅ THẮNG' : '❌ THUA'
+    tong_phien: slice.length,
+    win:        wins,
+    lose:       loses,
+    win_rate:   rate + '%',
+    chi_tiet:   slice.map(r => ({
+      phien:        r.phien,
+      du_doan:      r.du_doan,
+      ket_qua_thuc: r.ket_qua_thuc,
+      do_tin_cay:   r.do_tin_cay + '%',
+      ket_luan:     r.win ? '✅ THẮNG' : '❌ THUA'
     })),
     id: '@sewdangcap'
   });
@@ -431,20 +390,20 @@ app.get('/thangthua', (req, res) => {
 // ─────────────────────────────────────────────────────────────
 app.get('/id', (req, res) => {
   res.json({
-    ten_du_an:   'SicBo Prediction API',
-    mo_ta:       'Dự đoán Tài Xỉu kết hợp Công Thức 68GB + Markov Chain Bậc 1-2-3',
-    phac_do:     [
+    ten_du_an: 'API Tool Tài Xỉu Sunwin',
+    mo_ta:     'Dự đoán Tài Xỉu kết hợp Công Thức 68GB + Markov Chain Bậc 1-2-3',
+    phac_do:   [
       'Công Thức 68GB Bàn Xanh (6 quy tắc, 20+ nhánh)',
       'Markov Chain Bậc 1 (trọng số 1)',
       'Markov Chain Bậc 2 (trọng số 2)',
       'Markov Chain Bậc 3 (trọng số 3)',
       'Kết hợp: ưu tiên 68GB, Markov tăng/giảm độ tin cậy'
     ],
-    dev:         '@sewdangcap',
-    telegram:    'https://t.me/sewdangcap',
-    endpoints:   ['/', '/sunlon', '/history', '/thangthua', '/id'],
-    source_api:  SOURCE_API,
-    version:     '1.0.0'
+    dev:        '@sewdangcap',
+    telegram:   'https://t.me/sewdangcap',
+    endpoints:  ['/', '/sunlon', '/history', '/thangthua', '/id'],
+    source_api: SOURCE_API,
+    version:    '1.0.0'
   });
 });
 
@@ -456,4 +415,4 @@ app.use((req, res) => res.status(404).json({ error: 'Endpoint không tồn tại
 // ─────────────────────────────────────────────────────────────
 //  START
 // ─────────────────────────────────────────────────────────────
-app.listen(PORT, () => console.log(`\n🎲 SicBo API — DEV @sewdangcap\n   http://localhost:${PORT}\n   Polling source: ${SOURCE_API}\n`));
+app.listen(PORT, () => console.log(`\n🎲 API Tool Tài Xỉu Sunwin — DEV @sewdangcap\n   http://localhost:${PORT}\n   Polling source: ${SOURCE_API}\n`));
