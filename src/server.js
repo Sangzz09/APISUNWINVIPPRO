@@ -192,6 +192,8 @@ function combinePrediction(totals) {
 
 // ─────────────────────────────────────────────────────────────
 //  FETCH dữ liệu nguồn & cập nhật history
+//  Cấu trúc JSON nguồn:
+//  { session: 3088210, dice: [3,5,2], total: 10, ket_qua: "Xỉu" }
 // ─────────────────────────────────────────────────────────────
 let lastPhien = null;
 let pendingPrediction = null;
@@ -201,9 +203,12 @@ async function fetchAndUpdate() {
     const res  = await fetch(SOURCE_API, { signal: AbortSignal.timeout(8000) });
     const data = await res.json();
 
-    const phien   = String(data.phien);
-    const xucXac  = data.xuc_xac || null;
-    const tong    = Array.isArray(xucXac) ? xucXac.reduce((a, b) => a + b, 0) : 0;
+    // ── Map field mới: session / dice / total / ket_qua ──
+    const phien  = String(data.session);
+    const xucXac = data.dice || null;
+    const tong   = typeof data.total === 'number'
+                    ? data.total
+                    : (Array.isArray(xucXac) ? xucXac.reduce((a, b) => a + b, 0) : 0);
 
     if (lastPhien && phien !== lastPhien) {
       history.push({ phien, xuc_xac: xucXac, tong, ket_qua: label(tong) });
@@ -227,7 +232,9 @@ async function fetchAndUpdate() {
     const totals  = history.map(h => h.tong);
     const predict = combinePrediction(totals);
     const pattern = history.slice(-25).map(h => h.ket_qua).join('').toLowerCase();
-    const phienNext = String(Number(data.phien_hien_tai));
+
+    // phien tiếp theo = session hiện tại + 1
+    const phienNext = String(Number(data.session) + 1);
 
     pendingPrediction = {
       phien_du_doan: phienNext,
@@ -239,15 +246,14 @@ async function fetchAndUpdate() {
       method:        predict.method
     };
 
-    // ── Chỉ trả về các field yêu cầu ──
     return {
-      phien_hien_tai: Number(data.phien_hien_tai),
+      phien_hien_tai: Number(data.session),
       ket_qua:        fullLabel(tong),
       xuc_xac:        xucXac,
       phien_du_doan:  Number(phienNext),
       du_doan:        predict.du_doan,
       do_tin_cay:     predict.do_tin_cay + '%',
-      pattern:        pattern || (data.pattern || ''),
+      pattern:        pattern || '',
       id:             '@sewdangcap'
     };
 
@@ -275,7 +281,7 @@ app.use(cors());
 app.use(express.json());
 
 // ─────────────────────────────────────────────────────────────
-//  HOME  —  HTML điều hướng (ĐÃ CẬP NHẬT TITLE)
+//  HOME  —  HTML điều hướng
 // ─────────────────────────────────────────────────────────────
 app.get('/', (req, res) => {
   res.send(`<!DOCTYPE html>
@@ -329,7 +335,7 @@ app.get('/', (req, res) => {
 });
 
 // ─────────────────────────────────────────────────────────────
-//  /sunlon  —  JSON dự đoán chính (fields tinh gọn)
+//  /sunlon  —  JSON dự đoán chính
 // ─────────────────────────────────────────────────────────────
 app.get('/sunlon', async (req, res) => {
   if (!latestData) {
