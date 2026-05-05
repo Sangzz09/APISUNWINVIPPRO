@@ -2,13 +2,11 @@
  * ============================================================
  *  SIC BO PREDICTION API  —  DEV @sewdangcap
  *  Kết hợp: Công Thức 68GB + Markov Chain Bậc 1-2-3
- *  Deploy: Render.com  |  Node.js 18+
  * ============================================================
  */
 
-const express  = require('express');
-const cors     = require('cors');
-const path     = require('path');
+const express = require('express');
+const cors    = require('cors');
 
 const app  = express();
 const PORT = process.env.PORT || 3000;
@@ -17,15 +15,15 @@ const PORT = process.env.PORT || 3000;
 const SOURCE_API = 'https://apisunw-wspro.onrender.com/api/taixiu/history';
 
 // ─── In-memory store ─────────────────────────────────────────
-let history    = [];   // rolling 200 phiên
-let winLoss    = [];   // { phien, du_doan, ket_qua_thuc, win }
+let history = [];   // rolling 200 phiên
+let winLoss = [];   // { phien, du_doan, ket_qua_thuc, win }
 
 // ─── Helpers ─────────────────────────────────────────────────
-const isTai  = t => t >= 11 && t <= 18;
-const isXiu  = t => t >= 3  && t <= 10;
-const isChan = t => t % 2 === 0;
-const isLe   = t => t % 2 !== 0;
-const label  = t => isTai(t) ? 'T' : 'X';
+const isTai    = t => t >= 11 && t <= 18;
+const isXiu    = t => t >= 3  && t <= 10;
+const isChan   = t => t % 2 === 0;
+const isLe     = t => t % 2 !== 0;
+const label    = t => isTai(t) ? 'T' : 'X';
 const fullLabel = t => isTai(t) ? 'Tài' : 'Xỉu';
 
 // ─────────────────────────────────────────────────────────────
@@ -44,31 +42,23 @@ function apply68GB(totals) {
     if (t0 === 10) return { du_doan: 'Xỉu', rule: '1.1-NL', mo_ta: 'CT68 R1.1 Ngoại lệ 10-10-10 → Tiếp Xỉu' };
     return { du_doan: 'Tài', rule: '1.1', mo_ta: `CT68 R1.1 Bộ 3 Xỉu Chẵn ${t0}-${t0}-${t0} → Bẻ Tài` };
   }
-  if (n >= 3 && t0 === t1 && t1 === t2 && isXiu(t0) && isLe(t0)) {
+  if (n >= 3 && t0 === t1 && t1 === t2 && isXiu(t0) && isLe(t0))
     return { du_doan: 'Xỉu', rule: '1.2', mo_ta: `CT68 R1.2 Bộ 3 Xỉu Lẻ ${t0}-${t0}-${t0} → Tiếp Xỉu` };
-  }
-  if (t0 === 16 || t0 === 17) {
+  if (t0 === 16 || t0 === 17)
     return { du_doan: 'Xỉu', rule: '1.3', mo_ta: `CT68 R1.3 Max Tài (${t0}) → Bẻ Xỉu` };
-  }
-  if (n >= 4 && t0 === 11 && t1 === 11 && isXiu(t2) && isXiu(t3)) {
+  if (n >= 4 && t0 === 11 && t1 === 11 && isXiu(t2) && isXiu(t3))
     return { du_doan: 'Tài', rule: '1.4', mo_ta: `CT68 R1.4 Kép 11 sau bệt Xỉu → Tiếp Tài` };
-  }
 
   if (t0 === t1) {
-    if (isXiu(t0) && isChan(t0))
-      return { du_doan: 'Xỉu', rule: '2.1', mo_ta: `CT68 R2.1 Kép Xỉu Chẵn ${t0}-${t0} → Tiếp Xỉu` };
-    if (isXiu(t0) && isLe(t0))
-      return { du_doan: 'Tài', rule: '2.2', mo_ta: `CT68 R2.2 Kép Xỉu Lẻ ${t0}-${t0} → Bẻ Tài` };
-    if (isTai(t0) && isChan(t0))
-      return { du_doan: 'Xỉu', rule: '2.3', mo_ta: `CT68 R2.3 Kép Tài Chẵn ${t0}-${t0} → Bẻ Xỉu` };
-    if (isTai(t0) && isLe(t0))
-      return { du_doan: 'Tài', rule: '2.4', mo_ta: `CT68 R2.4 Kép Tài Lẻ ${t0}-${t0} → Tiếp Tài` };
+    if (isXiu(t0) && isChan(t0)) return { du_doan: 'Xỉu', rule: '2.1', mo_ta: `CT68 R2.1 Kép Xỉu Chẵn ${t0}-${t0} → Tiếp Xỉu` };
+    if (isXiu(t0) && isLe(t0))   return { du_doan: 'Tài', rule: '2.2', mo_ta: `CT68 R2.2 Kép Xỉu Lẻ ${t0}-${t0} → Bẻ Tài` };
+    if (isTai(t0) && isChan(t0)) return { du_doan: 'Xỉu', rule: '2.3', mo_ta: `CT68 R2.3 Kép Tài Chẵn ${t0}-${t0} → Bẻ Xỉu` };
+    if (isTai(t0) && isLe(t0))   return { du_doan: 'Tài', rule: '2.4', mo_ta: `CT68 R2.4 Kép Tài Lẻ ${t0}-${t0} → Tiếp Tài` };
   }
 
   if (n >= 5) {
     const last5 = totals.slice(n - 5);
-    const allSame = last5.every(v => label(v) === label(last5[0]));
-    if (allSame)
+    if (last5.every(v => label(v) === label(last5[0])))
       return { du_doan: isTai(t0) ? 'Xỉu' : 'Tài', rule: '3.1', mo_ta: `CT68 R3.1 Bệt 5 ${label(t0)} → Bẻ` };
   }
   if (n >= 3) {
@@ -163,8 +153,8 @@ function markovPredict(seq) {
 
   const total = scores.T + scores.X;
   if (total === 0) return null;
-  const pred  = scores.T >= scores.X ? 'T' : 'X';
-  const conf  = Math.round(Math.max(scores.T, scores.X) / total * 100);
+  const pred = scores.T >= scores.X ? 'T' : 'X';
+  const conf = Math.round(Math.max(scores.T, scores.X) / total * 100);
   return { du_doan: pred === 'T' ? 'Tài' : 'Xỉu', do_tin_cay: conf };
 }
 
@@ -192,10 +182,9 @@ function combinePrediction(totals) {
 
 // ─────────────────────────────────────────────────────────────
 //  FETCH dữ liệu nguồn & cập nhật history
-//  Cấu trúc JSON nguồn:
-//  { session: 3088210, dice: [3,5,2], total: 10, ket_qua: "Xỉu" }
+//  API nguồn trả về MẢNG (array) các phiên, sắp xếp mới nhất trước
+//  [{ session, dice, total, ket_qua }, ...]
 // ─────────────────────────────────────────────────────────────
-let lastPhien = null;
 let pendingPrediction = null;
 
 async function fetchAndUpdate() {
@@ -203,38 +192,54 @@ async function fetchAndUpdate() {
     const res  = await fetch(SOURCE_API, { signal: AbortSignal.timeout(8000) });
     const data = await res.json();
 
-    // ── Map field mới: session / dice / total / ket_qua ──
-    const phien  = String(data.session);
-    const xucXac = data.dice || null;
-    const tong   = typeof data.total === 'number'
-                    ? data.total
-                    : (Array.isArray(xucXac) ? xucXac.reduce((a, b) => a + b, 0) : 0);
+    // ── Xác nhận dữ liệu là mảng ──
+    if (!Array.isArray(data) || data.length === 0) {
+      console.error('[fetchAndUpdate] Dữ liệu nguồn không phải mảng:', data);
+      return null;
+    }
 
-    if (lastPhien && phien !== lastPhien) {
-      history.push({ phien, xuc_xac: xucXac, tong, ket_qua: label(tong) });
-      if (history.length > 200) history.shift();
+    // ── Sắp xếp tăng dần theo session (cũ → mới) ──
+    const sorted = [...data].sort((a, b) => a.session - b.session);
 
-      if (pendingPrediction && String(pendingPrediction.phien_du_doan) === phien) {
-        const win = pendingPrediction.du_doan_raw === label(tong);
-        winLoss.push({
-          phien,
-          du_doan:      pendingPrediction.du_doan,
-          ket_qua_thuc: fullLabel(tong),
-          win,
-          do_tin_cay:   pendingPrediction.do_tin_cay
-        });
-        if (winLoss.length > 200) winLoss.shift();
+    // ── Phiên mới nhất ──
+    const latest = sorted[sorted.length - 1];
+    const latestPhien = String(latest.session);
+
+    // ── Thêm vào history các phiên chưa có ──
+    const existingSessions = new Set(history.map(h => h.phien));
+    let addedNew = false;
+
+    for (const item of sorted) {
+      const phien = String(item.session);
+      if (!existingSessions.has(phien)) {
+        const tong   = typeof item.total === 'number' ? item.total
+                       : (Array.isArray(item.dice) ? item.dice.reduce((a, b) => a + b, 0) : 0);
+        history.push({ phien, xuc_xac: item.dice || null, tong, ket_qua: label(tong) });
+        existingSessions.add(phien);
+        addedNew = true;
+
+        // ── Kiểm tra win/loss cho phiên vừa vào ──
+        if (pendingPrediction && String(pendingPrediction.phien_du_doan) === phien) {
+          const win = pendingPrediction.du_doan_raw === label(tong);
+          winLoss.push({
+            phien,
+            du_doan:      pendingPrediction.du_doan,
+            ket_qua_thuc: fullLabel(tong),
+            win,
+            do_tin_cay:   pendingPrediction.do_tin_cay
+          });
+          if (winLoss.length >= 100) winLoss = [];  // reset sau 100 phiên
+        }
       }
     }
 
-    lastPhien = phien;
+    if (history.length > 200) history = history.slice(-200);
 
+    // ── Tính dự đoán cho phiên tiếp theo ──
     const totals  = history.map(h => h.tong);
     const predict = combinePrediction(totals);
     const pattern = history.slice(-25).map(h => h.ket_qua).join('').toLowerCase();
-
-    // phien tiếp theo = session hiện tại + 1
-    const phienNext = String(Number(data.session) + 1);
+    const phienNext = String(latest.session + 1);
 
     pendingPrediction = {
       phien_du_doan: phienNext,
@@ -246,14 +251,17 @@ async function fetchAndUpdate() {
       method:        predict.method
     };
 
+    const latestTotal = typeof latest.total === 'number' ? latest.total
+                        : (Array.isArray(latest.dice) ? latest.dice.reduce((a, b) => a + b, 0) : 0);
+
     return {
-      phien_hien_tai: Number(data.session),
-      ket_qua:        fullLabel(tong),
-      xuc_xac:        xucXac,
+      phien_hien_tai: latest.session,
+      ket_qua:        fullLabel(latestTotal),
+      xuc_xac:        latest.dice || null,
       phien_du_doan:  Number(phienNext),
       du_doan:        predict.du_doan,
       do_tin_cay:     predict.do_tin_cay + '%',
-      pattern:        pattern || '',
+      pattern,
       id:             '@sewdangcap'
     };
 
@@ -295,7 +303,7 @@ app.get('/', (req, res) => {
   body{background:#0d1117;color:#e6edf3;font-family:'Segoe UI',sans-serif;min-height:100vh;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:24px}
   h1{font-size:2rem;font-weight:700;margin-bottom:6px;color:#58a6ff}
   .sub{color:#8b949e;font-size:.9rem;margin-bottom:40px}
-  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:16px;width:100%;max-width:900px}
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:16px;width:100%;max-width:700px}
   .card{background:#161b22;border:1px solid #30363d;border-radius:12px;padding:24px;cursor:pointer;transition:all .2s;text-decoration:none;color:inherit}
   .card:hover{border-color:#58a6ff;transform:translateY(-2px);box-shadow:0 8px 24px rgba(88,166,255,.15)}
   .card h2{font-size:1.1rem;margin-bottom:8px;color:#58a6ff}
@@ -323,11 +331,6 @@ app.get('/', (req, res) => {
     <h2>📊 /thangthua</h2>
     <p>Thống kê thắng / thua — Win rate, tổng win/lose từng phiên</p>
   </a>
-  <a class="card" href="/id">
-    <span class="badge">INFO</span>
-    <h2>👤 /id</h2>
-    <p>Thông tin dev &amp; liên hệ Telegram @sewdangcap</p>
-  </a>
 </div>
 <footer>© 2025 DEV @sewdangcap — All rights reserved</footer>
 </body>
@@ -352,17 +355,12 @@ app.get('/sunlon', async (req, res) => {
 app.get('/history', (req, res) => {
   const limit = Math.min(Number(req.query.limit) || 50, 200);
   const data  = history.slice(-limit).reverse().map(h => ({
-    phien:    h.phien,
-    xuc_xac:  h.xuc_xac,
-    tong:     h.tong,
-    ket_qua:  h.ket_qua === 'T' ? 'Tài' : 'Xỉu'
+    phien:   h.phien,
+    xuc_xac: h.xuc_xac,
+    tong:    h.tong,
+    ket_qua: h.ket_qua === 'T' ? 'Tài' : 'Xỉu'
   }));
-  res.json({
-    total:    history.length,
-    hien_thi: data.length,
-    data,
-    id: '@sewdangcap'
-  });
+  res.json({ total: history.length, hien_thi: data.length, data, id: '@sewdangcap' });
 });
 
 // ─────────────────────────────────────────────────────────────
@@ -392,33 +390,15 @@ app.get('/thangthua', (req, res) => {
 });
 
 // ─────────────────────────────────────────────────────────────
-//  /id  —  Thông tin dev
-// ─────────────────────────────────────────────────────────────
-app.get('/id', (req, res) => {
-  res.json({
-    ten_du_an: 'API Tool Tài Xỉu Sunwin',
-    mo_ta:     'Dự đoán Tài Xỉu kết hợp Công Thức 68GB + Markov Chain Bậc 1-2-3',
-    phac_do:   [
-      'Công Thức 68GB Bàn Xanh (6 quy tắc, 20+ nhánh)',
-      'Markov Chain Bậc 1 (trọng số 1)',
-      'Markov Chain Bậc 2 (trọng số 2)',
-      'Markov Chain Bậc 3 (trọng số 3)',
-      'Kết hợp: ưu tiên 68GB, Markov tăng/giảm độ tin cậy'
-    ],
-    dev:        '@sewdangcap',
-    telegram:   'https://t.me/sewdangcap',
-    endpoints:  ['/', '/sunlon', '/history', '/thangthua', '/id'],
-    source_api: SOURCE_API,
-    version:    '1.0.0'
-  });
-});
-
-// ─────────────────────────────────────────────────────────────
 //  404
 // ─────────────────────────────────────────────────────────────
-app.use((req, res) => res.status(404).json({ error: 'Endpoint không tồn tại', endpoints: ['/', '/sunlon', '/history', '/thangthua', '/id'] }));
+app.use((req, res) =>
+  res.status(404).json({ error: 'Endpoint không tồn tại', endpoints: ['/', '/sunlon', '/history', '/thangthua'] })
+);
 
 // ─────────────────────────────────────────────────────────────
 //  START
 // ─────────────────────────────────────────────────────────────
-app.listen(PORT, () => console.log(`\n🎲 API Tool Tài Xỉu Sunwin — DEV @sewdangcap\n   http://localhost:${PORT}\n   Polling source: ${SOURCE_API}\n`));
+app.listen(PORT, () =>
+  console.log(`\n🎲 API Tool Tài Xỉu Sunwin — DEV @sewdangcap\n   http://localhost:${PORT}\n   Polling: ${SOURCE_API}\n`)
+);
