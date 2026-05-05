@@ -14,7 +14,7 @@ const app  = express();
 const PORT = process.env.PORT || 3000;
 
 // ─── Source API ───────────────────────────────────────────────
-const SOURCE_API = 'https://apisunw-wspro.onrender.com/';
+const SOURCE_API = 'https://apisunw-wspro.onrender.com/api/taixiu/history';
 
 // ─── In-memory store ─────────────────────────────────────────
 let history    = [];   // rolling 200 phiên
