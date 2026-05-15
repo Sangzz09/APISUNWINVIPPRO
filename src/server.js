@@ -58,6 +58,11 @@ function applySunwinRules(hist) {
   if (T2 !== null && isTai(T2) && isChan(T2) && T1 === 11)
     return { du_doan: 'Xỉu', rule: 'SW-7', nhom: 2, mo_ta: `SunwinR7: Tài Chẵn ${T2} → Tài 11 → Bẻ Xỉu` };
 
+  // Rule 11 — Tài Lẻ đặc thù (13 hoặc 11) → Xỉu 10 → Theo tiếp Xỉu
+  if (T2 !== null && (T2 === 13 || T2 === 11) && T1 === 10)
+    return { du_doan: 'Xỉu', rule: 'SW-11', nhom: 2, mo_ta: `SunwinR11: Tài Lẻ ${T2} → Xỉu 10 → Theo tiếp Xỉu` };
+
+  // Rule 8 — Tài Lẻ (các giá trị khác) → Xỉu 10 → Bẻ ngược Tài
   if (T2 !== null && isTai(T2) && isLe(T2) && T1 === 10)
     return { du_doan: 'Tài', rule: 'SW-8', nhom: 2, mo_ta: `SunwinR8: Tài Lẻ ${T2} → Xỉu 10 → Bẻ Tài` };
 
@@ -74,7 +79,7 @@ function applySunwinRules(hist) {
 //  MODULE 2 — MARKOV CHAIN BẬC 1 / 2 / 3
 // ═══════════════════════════════════════════════════════════════
 function buildMarkovTables(seq) {
-  const tables = { order1: {}, order2: {}, order3: {} };
+  const tables = { order1: {}, order2: {}, order3: {}, order4: {} };
   for (let i = 1; i < seq.length; i++) {
     const k1 = seq[i - 1];
     tables.order1[k1] = tables.order1[k1] || { T: 0, X: 0, total: 0 };
@@ -93,20 +98,38 @@ function buildMarkovTables(seq) {
     tables.order3[k3][seq[i]]++;
     tables.order3[k3].total++;
   }
+  for (let i = 4; i < seq.length; i++) {
+    const k4 = seq[i - 4] + seq[i - 3] + seq[i - 2] + seq[i - 1];
+    tables.order4[k4] = tables.order4[k4] || { T: 0, X: 0, total: 0 };
+    tables.order4[k4][seq[i]]++;
+    tables.order4[k4].total++;
+  }
   return tables;
 }
 
-const MARKOV_WEIGHTS    = { order3: 0.50, order2: 0.30, order1: 0.20 };
+const MARKOV_WEIGHTS    = { order4: 0.40, order3: 0.30, order2: 0.20, order1: 0.10 };
 const MARKOV_MIN_SAMPLE = 2;
 
 function markovPredict(seq) {
-  if (seq.length < 4) return null;
+  if (seq.length < 5) return null;
   const tables = buildMarkovTables(seq);
   const n = seq.length;
   const scores = { T: 0, X: 0 };
   const details = {};
   let totalWeight = 0;
 
+  // Bậc 4
+  const k4 = seq[n - 4] + seq[n - 3] + seq[n - 2] + seq[n - 1];
+  const m4 = tables.order4[k4];
+  if (m4 && m4.total >= MARKOV_MIN_SAMPLE) {
+    const w = MARKOV_WEIGHTS.order4;
+    scores.T += w * (m4.T / m4.total);
+    scores.X += w * (m4.X / m4.total);
+    totalWeight += w;
+    details.order4 = { key: k4, T: m4.T, X: m4.X, total: m4.total };
+  }
+
+  // Bậc 3
   const k3 = seq[n - 3] + seq[n - 2] + seq[n - 1];
   const m3 = tables.order3[k3];
   if (m3 && m3.total >= MARKOV_MIN_SAMPLE) {
