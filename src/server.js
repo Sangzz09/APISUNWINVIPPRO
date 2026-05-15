@@ -19,14 +19,15 @@ const cors    = require('cors');
 const app  = express();
 const PORT = process.env.PORT || 3000;
 
+// ── SỬA: JSON nguồn có dạng [{"session":3100114,"dice":[1,1,5],"total":7,"ket_qua":"Xỉu"}]
 const SOURCE_API = 'https://apisunlichsu.onrender.com/api/taixiu/history';
 
 // ─── In-memory store ──────────────────────────────────────────
 /**
  * history[i] = {
  *   phien:   string,
- *   dice:    [d1, d2, d3],   // 3 giá trị xúc xắc (1-6)
- *   tong:    number,         // d1+d2+d3  (3-18)
+ *   dice:    [d1, d2, d3],
+ *   tong:    number,
  *   ket_qua: 'T' | 'X'
  * }
  */
@@ -130,20 +131,9 @@ function apply68GB(totals) {
 
 // ═══════════════════════════════════════════════════════════════
 //  MODULE 2 — MARKOV CHAIN BẬC 1 / 2 / 3
-//  (tách biệt, trọng số rõ ràng, trả về chi tiết từng bậc)
 // ═══════════════════════════════════════════════════════════════
-
-/**
- * Xây bảng chuyển trạng thái cho cả 3 bậc
- * @param {string[]} seq - mảng 'T'/'X'
- * @returns {{ order1, order2, order3 }}
- */
 function buildMarkovTables(seq) {
-  const tables = {
-    order1: {},  // key: "T" | "X"
-    order2: {},  // key: "TT" | "TX" | "XT" | "XX"
-    order3: {}   // key: "TTT" | "TTX" | ... (8 tổ hợp)
-  };
+  const tables = { order1: {}, order2: {}, order3: {} };
 
   for (let i = 1; i < seq.length; i++) {
     const k1 = seq[i - 1];
@@ -151,14 +141,12 @@ function buildMarkovTables(seq) {
     tables.order1[k1][seq[i]]++;
     tables.order1[k1].total++;
   }
-
   for (let i = 2; i < seq.length; i++) {
     const k2 = seq[i - 2] + seq[i - 1];
     tables.order2[k2] = tables.order2[k2] || { T: 0, X: 0, total: 0 };
     tables.order2[k2][seq[i]]++;
     tables.order2[k2].total++;
   }
-
   for (let i = 3; i < seq.length; i++) {
     const k3 = seq[i - 3] + seq[i - 2] + seq[i - 1];
     tables.order3[k3] = tables.order3[k3] || { T: 0, X: 0, total: 0 };
@@ -169,79 +157,50 @@ function buildMarkovTables(seq) {
   return tables;
 }
 
-/**
- * Trọng số: Bậc 3 = 50%, Bậc 2 = 30%, Bậc 1 = 20%
- * Chỉ áp dụng bậc có đủ sample (total >= 2)
- */
-const MARKOV_WEIGHTS = { order3: 0.50, order2: 0.30, order1: 0.20 };
-const MARKOV_MIN_SAMPLE = 2; // cần ít nhất N mẫu để tin tưởng
+const MARKOV_WEIGHTS   = { order3: 0.50, order2: 0.30, order1: 0.20 };
+const MARKOV_MIN_SAMPLE = 2;
 
 function markovPredict(seq) {
   if (seq.length < 4) return null;
 
   const tables = buildMarkovTables(seq);
-  const n = seq.length;
+  const n      = seq.length;
   const scores = { T: 0, X: 0 };
   const details = {};
   let totalWeight = 0;
 
-  // ── Bậc 3 ──
   const k3 = seq[n - 3] + seq[n - 2] + seq[n - 1];
-  const m3 = tables.order3[k3];
+  const m3  = tables.order3[k3];
   if (m3 && m3.total >= MARKOV_MIN_SAMPLE) {
     const w = MARKOV_WEIGHTS.order3;
     scores.T += w * (m3.T / m3.total);
     scores.X += w * (m3.X / m3.total);
     totalWeight += w;
-    details.order3 = {
-      key:   k3,
-      T:     m3.T,
-      X:     m3.X,
-      total: m3.total,
-      probT: Math.round(m3.T / m3.total * 100),
-      probX: Math.round(m3.X / m3.total * 100)
-    };
+    details.order3 = { key: k3, T: m3.T, X: m3.X, total: m3.total, probT: Math.round(m3.T / m3.total * 100), probX: Math.round(m3.X / m3.total * 100) };
   }
 
-  // ── Bậc 2 ──
   const k2 = seq[n - 2] + seq[n - 1];
-  const m2 = tables.order2[k2];
+  const m2  = tables.order2[k2];
   if (m2 && m2.total >= MARKOV_MIN_SAMPLE) {
     const w = MARKOV_WEIGHTS.order2;
     scores.T += w * (m2.T / m2.total);
     scores.X += w * (m2.X / m2.total);
     totalWeight += w;
-    details.order2 = {
-      key:   k2,
-      T:     m2.T,
-      X:     m2.X,
-      total: m2.total,
-      probT: Math.round(m2.T / m2.total * 100),
-      probX: Math.round(m2.X / m2.total * 100)
-    };
+    details.order2 = { key: k2, T: m2.T, X: m2.X, total: m2.total, probT: Math.round(m2.T / m2.total * 100), probX: Math.round(m2.X / m2.total * 100) };
   }
 
-  // ── Bậc 1 ──
   const k1 = seq[n - 1];
-  const m1 = tables.order1[k1];
+  const m1  = tables.order1[k1];
   if (m1 && m1.total >= MARKOV_MIN_SAMPLE) {
     const w = MARKOV_WEIGHTS.order1;
     scores.T += w * (m1.T / m1.total);
     scores.X += w * (m1.X / m1.total);
     totalWeight += w;
-    details.order1 = {
-      key:   k1,
-      T:     m1.T,
-      X:     m1.X,
-      total: m1.total,
-      probT: Math.round(m1.T / m1.total * 100),
-      probX: Math.round(m1.X / m1.total * 100)
-    };
+    details.order1 = { key: k1, T: m1.T, X: m1.X, total: m1.total, probT: Math.round(m1.T / m1.total * 100), probX: Math.round(m1.X / m1.total * 100) };
   }
 
   if (totalWeight === 0) return null;
 
-  // Chuẩn hóa theo trọng số thực tế dùng được
   const normT = scores.T / totalWeight;
   const normX = scores.X / totalWeight;
   const pred  = normT >= normX ? 'T' : 'X';
@@ -250,39 +209,26 @@ function markovPredict(seq) {
   return {
     du_doan:    pred === 'T' ? 'Tài' : 'Xỉu',
     do_tin_cay: conf,
-    details,    // chi tiết từng bậc
-    scores:     { T: Math.round(normT * 100), X: Math.round(normX * 100) }
+    details,
+    scores: { T: Math.round(normT * 100), X: Math.round(normX * 100) }
   };
 }
 
 // ═══════════════════════════════════════════════════════════════
 //  MODULE 3 — DICE PATTERN ANALYZER
-//  Phân tích dữ liệu xúc xắc thô để phát hiện pattern đặc biệt
 // ═══════════════════════════════════════════════════════════════
-
-/**
- * Phân loại 1 phiên xúc xắc
- * @param {number[]} dice - [d1, d2, d3]
- * @returns {{ type, value, detail }}
- */
 function classifyDice(dice) {
   if (!dice || dice.length !== 3) return { type: 'unknown', value: null };
   const [a, b, c] = dice.sort((x, y) => x - y);
 
-  if (a === b && b === c)           return { type: 'triple',   value: a,    detail: `Triple ${a}` };
-  if (a === b || b === c)           return { type: 'double',   value: b,    detail: `Double ${a === b ? a : b}` };
-  if (c - a === 2 && b - a === 1)   return { type: 'sequence', value: null, detail: `Seq ${a}-${b}-${c}` };
+  if (a === b && b === c)         return { type: 'triple',   value: a,    detail: `Triple ${a}` };
+  if (a === b || b === c)         return { type: 'double',   value: b,    detail: `Double ${a === b ? a : b}` };
+  if (c - a === 2 && b - a === 1) return { type: 'sequence', value: null, detail: `Seq ${a}-${b}-${c}` };
   return { type: 'mixed', value: null, detail: `${a}-${b}-${c}` };
 }
 
-/**
- * Tính tần suất mặt xúc xắc trong N phiên gần nhất
- * @param {Array} hist - history array
- * @param {number} n   - số phiên nhìn lại
- * @returns {{ freq: {1..6: count}, hot: number[], cold: number[] }}
- */
 function diceFrequency(hist, n = 30) {
-  const freq = { 1: 0, 2: 0, 3: 0, 4: 0, 5: 0, 6: 0 };
+  const freq  = { 1: 0, 2: 0, 3: 0, 4: 0, 5: 0, 6: 0 };
   const slice = hist.slice(-n);
 
   for (const h of slice) {
@@ -298,30 +244,17 @@ function diceFrequency(hist, n = 30) {
   return { freq, hot, cold };
 }
 
-/**
- * Phát hiện pattern xúc xắc và cho tín hiệu dự đoán
- * Logic:
- *  - Triple 3 phiên liên tiếp → Tài (tổng thường bị đẩy lên)
- *  - Double giảm dần 3 phiên → Xỉu
- *  - Tần suất mặt 5,6 vượt ngưỡng → Tài
- *  - Tần suất mặt 1,2 vượt ngưỡng → Xỉu
- * @param {Array} hist
- * @returns {{ du_doan: string, do_tin_cay: number, mo_ta: string } | null}
- */
 function dicePatternPredict(hist) {
   if (hist.length < 5) return null;
 
   const recent = hist.slice(-5);
   const types  = recent.map(h => classifyDice(h.dice));
 
-  // ── Phát hiện bệt Triple ──
   const last3Types = types.slice(-3);
-  if (last3Types.every(t => t.type === 'triple')) {
+  if (last3Types.every(t => t.type === 'triple'))
     return { du_doan: 'Tài', do_tin_cay: 72, mo_ta: 'DicePattern: 3 Triple liên tiếp → đẩy Tài' };
-  }
 
-  // ── Phát hiện Double liên tiếp giảm ──
-  const last3 = hist.slice(-3);
+  const last3     = hist.slice(-3);
   const allDouble = last3.every(h => classifyDice(h.dice).type === 'double');
   if (allDouble) {
     const vals = last3.map(h => classifyDice(h.dice).value);
@@ -329,26 +262,21 @@ function dicePatternPredict(hist) {
       return { du_doan: 'Xỉu', do_tin_cay: 68, mo_ta: `DicePattern: Double giảm dần ${vals[0]}→${vals[1]}→${vals[2]} → Xỉu` };
   }
 
-  // ── Tần suất mặt Hot/Cold (20 phiên gần nhất) ──
   const { freq } = diceFrequency(hist, 20);
   const totalRolls = Object.values(freq).reduce((a, b) => a + b, 0);
-  if (totalRolls < 30) return null; // chưa đủ dữ liệu
+  if (totalRolls < 30) return null;
 
   const high = (freq[5] + freq[6]) / totalRolls;
   const low  = (freq[1] + freq[2]) / totalRolls;
 
-  // Kỳ vọng lý thuyết: mỗi mặt ~16.7%, mặt 5+6 ~33.3%
-  if (high > 0.46) // mặt cao xuất hiện nhiều hơn kỳ vọng 38%
-    return { du_doan: 'Tài', do_tin_cay: 63, mo_ta: `DicePattern: Mặt 5+6 hot (${Math.round(high * 100)}%) → Tài` };
-  if (low > 0.46)
-    return { du_doan: 'Xỉu', do_tin_cay: 63, mo_ta: `DicePattern: Mặt 1+2 hot (${Math.round(low * 100)}%) → Xỉu` };
+  if (high > 0.46) return { du_doan: 'Tài', do_tin_cay: 63, mo_ta: `DicePattern: Mặt 5+6 hot (${Math.round(high * 100)}%) → Tài` };
+  if (low  > 0.46) return { du_doan: 'Xỉu', do_tin_cay: 63, mo_ta: `DicePattern: Mặt 1+2 hot (${Math.round(low  * 100)}%) → Xỉu` };
 
   return null;
 }
 
 // ═══════════════════════════════════════════════════════════════
 //  MODULE 4 — KẾT HỢP 4 TÍN HIỆU
-//  68GB (ưu tiên cao) + Markov + DicePattern + DiceFreq
 // ═══════════════════════════════════════════════════════════════
 function combinePrediction(hist) {
   if (hist.length < 2) return { du_doan: 'Tài', do_tin_cay: 50, method: 'default' };
@@ -360,39 +288,33 @@ function combinePrediction(hist) {
   const mrk  = markovPredict(seq);
   const dice = dicePatternPredict(hist);
 
-  // ── Tập hợp phiếu bầu từ mỗi tín hiệu ──
-  const votes = { T: 0, X: 0 };
+  const votes   = { T: 0, X: 0 };
   const signals = [];
 
   if (r68) {
-    // 68GB có quyền phủ quyết nhẹ (trọng số 3)
     const v = r68.du_doan === 'Tài' ? 'T' : 'X';
     votes[v] += 3;
     signals.push({ src: '68GB', pred: r68.du_doan, rule: r68.rule });
   }
-
   if (mrk) {
-    // Markov bậc 3: trọng số tỉ lệ với độ tin cậy
     const v  = mrk.du_doan === 'Tài' ? 'T' : 'X';
     const wt = mrk.do_tin_cay >= 70 ? 2 : 1;
     votes[v] += wt;
     signals.push({ src: 'Markov', pred: mrk.du_doan, conf: mrk.do_tin_cay, details: mrk.details });
   }
-
   if (dice) {
     const v = dice.du_doan === 'Tài' ? 'T' : 'X';
     votes[v] += 1;
     signals.push({ src: 'DicePattern', pred: dice.du_doan, conf: dice.do_tin_cay });
   }
 
-  const totalVotes = votes.T + votes.X;
+  const totalVotes  = votes.T + votes.X;
   if (totalVotes === 0) return { du_doan: 'Tài', do_tin_cay: 50, method: 'default' };
 
-  const winner = votes.T >= votes.X ? 'Tài' : 'Xỉu';
+  const winner      = votes.T >= votes.X ? 'Tài' : 'Xỉu';
   const winnerVotes = Math.max(votes.T, votes.X);
   const agreement   = Math.round(winnerVotes / totalVotes * 100);
 
-  // Độ tin cậy kết hợp
   let conf;
   if (!r68 && !mrk && !dice) {
     conf = 50;
@@ -404,7 +326,6 @@ function combinePrediction(hist) {
     conf = Math.max(52, Math.round(agreement * 0.75 + 10));
   }
 
-  // Xác định method
   let method;
   if (r68 && mrk && dice) method = 'full-combo';
   else if (r68 && mrk)    method = 'combo';
@@ -415,12 +336,11 @@ function combinePrediction(hist) {
   return {
     du_doan:    winner,
     do_tin_cay: conf,
-    rule:       r68 ? r68.rule   : (mrk ? 'Markov' : 'DicePattern'),
-    mo_ta:      r68 ? r68.mo_ta  : (dice ? dice.mo_ta : `Markov ${mrk?.do_tin_cay}%`),
+    rule:       r68 ? r68.rule  : (mrk ? 'Markov' : 'DicePattern'),
+    mo_ta:      r68 ? r68.mo_ta : (dice ? dice.mo_ta : `Markov ${mrk?.do_tin_cay}%`),
     method,
     votes,
     signals,
-    // Markov chi tiết (expose ra API)
     markov_detail: mrk ? {
       bac1: mrk.details.order1 || null,
       bac2: mrk.details.order2 || null,
@@ -431,7 +351,9 @@ function combinePrediction(hist) {
 }
 
 // ═══════════════════════════════════════════════════════════════
-//  FETCH & UPDATE — Lưu cả dice vào history
+//  FETCH & UPDATE
+//  ── CHỈ SỬA PHẦN NÀY để khớp JSON nguồn ──
+//  JSON nguồn: [{"session":3100114,"dice":[1,1,5],"total":7,"ket_qua":"Xỉu"}]
 // ═══════════════════════════════════════════════════════════════
 let pendingPrediction = null;
 
@@ -445,6 +367,7 @@ async function fetchAndUpdate() {
       return null;
     }
 
+    // ── SỬA: sort theo session (số phiên) ──
     const sorted = [...data].sort((a, b) => a.session - b.session);
     const latest = sorted[sorted.length - 1];
 
@@ -454,7 +377,7 @@ async function fetchAndUpdate() {
       const phien = String(item.session);
       if (existingSessions.has(phien)) continue;
 
-      // ── Lưu dice đầy đủ ──
+      // ── SỬA: đọc dice và total đúng field ──
       const diceArr = Array.isArray(item.dice) && item.dice.length === 3
         ? item.dice.map(Number)
         : null;
@@ -463,17 +386,22 @@ async function fetchAndUpdate() {
         ? item.total
         : (diceArr ? diceArr.reduce((a, b) => a + b, 0) : 0);
 
+      // ── SỬA: ket_qua từ nguồn là "Tài"/"Xỉu" → convert sang T/X ──
+      const ketQua = item.ket_qua === 'Tài' ? 'T'
+                   : item.ket_qua === 'Xỉu' ? 'X'
+                   : label(tong); // fallback: tính từ tổng
+
       history.push({
         phien,
-        dice:    diceArr,    // [d1, d2, d3] hoặc null nếu API không trả về
+        dice:    diceArr,
         tong,
-        ket_qua: label(tong)
+        ket_qua: ketQua
       });
       existingSessions.add(phien);
 
       // ── Kiểm tra win/loss cho pending prediction ──
       if (pendingPrediction && String(pendingPrediction.phien_du_doan) === phien) {
-        const win = pendingPrediction.du_doan_raw === label(tong);
+        const win = pendingPrediction.du_doan_raw === ketQua;
         winLoss.push({
           phien,
           du_doan:      pendingPrediction.du_doan,
@@ -482,7 +410,7 @@ async function fetchAndUpdate() {
           do_tin_cay:   pendingPrediction.do_tin_cay,
           method:       pendingPrediction.method
         });
-        if (winLoss.length >= 200) winLoss = winLoss.slice(-100); // giữ 100 mới nhất
+        if (winLoss.length >= 200) winLoss = winLoss.slice(-100);
         pendingPrediction = null;
       }
     }
@@ -503,30 +431,30 @@ async function fetchAndUpdate() {
       method:        predict.method
     };
 
+    // ── SỬA: total phiên mới nhất đọc từ item.total ──
     const latestTotal = typeof latest.total === 'number'
       ? latest.total
       : (Array.isArray(latest.dice) ? latest.dice.reduce((a, b) => a + b, 0) : 0);
 
-    // ── Dice info phiên mới nhất ──
     const latestDice    = Array.isArray(latest.dice) ? latest.dice : null;
     const latestDiceInfo = latestDice ? classifyDice([...latestDice]) : null;
 
     return {
-      phien_hien_tai: latest.session,
-      ket_qua:        fullLabel(latestTotal),
-      xuc_xac:        latestDice,
+      phien_hien_tai:    latest.session,
+      ket_qua:           fullLabel(latestTotal),
+      xuc_xac:           latestDice,
       xuc_xac_phan_loai: latestDiceInfo ? latestDiceInfo.detail : null,
-      phien_du_doan:  Number(phienNext),
-      du_doan:        predict.du_doan,
-      do_tin_cay:     predict.do_tin_cay + '%',
-      rule:           predict.rule,
-      mo_ta:          predict.mo_ta,
-      method:         predict.method,
-      votes:          predict.votes,
-      signals:        predict.signals,
-      markov_detail:  predict.markov_detail,
+      phien_du_doan:     Number(phienNext),
+      du_doan:           predict.du_doan,
+      do_tin_cay:        predict.do_tin_cay + '%',
+      rule:              predict.rule,
+      mo_ta:             predict.mo_ta,
+      method:            predict.method,
+      votes:             predict.votes,
+      signals:           predict.signals,
+      markov_detail:     predict.markov_detail,
       pattern,
-      id:             '@sewdangcap'
+      id:                '@sewdangcap'
     };
 
   } catch (e) {
@@ -626,11 +554,11 @@ app.get('/sunlon', async (req, res) => {
 app.get('/history', (req, res) => {
   const limit = Math.min(Number(req.query.limit) || 50, 200);
   const data  = history.slice(-limit).reverse().map(h => ({
-    phien:        h.phien,
-    xuc_xac:      h.dice,
+    phien:             h.phien,
+    xuc_xac:           h.dice,
     xuc_xac_phan_loai: h.dice ? classifyDice([...h.dice]).detail : null,
-    tong:         h.tong,
-    ket_qua:      h.ket_qua === 'T' ? 'Tài' : 'Xỉu'
+    tong:              h.tong,
+    ket_qua:           h.ket_qua === 'T' ? 'Tài' : 'Xỉu'
   }));
   res.json({ total: history.length, hien_thi: data.length, data, id: '@sewdangcap' });
 });
@@ -643,7 +571,6 @@ app.get('/thangthua', (req, res) => {
   const loses = slice.length - wins;
   const rate  = slice.length ? Math.round(wins / slice.length * 100) : 0;
 
-  // Thống kê win rate theo method
   const methodStats = {};
   for (const r of slice) {
     const m = r.method || 'unknown';
@@ -673,7 +600,7 @@ app.get('/thangthua', (req, res) => {
   });
 });
 
-// ── /dice-stats ── (ENDPOINT MỚI) ────────────────────────────
+// ── /dice-stats ───────────────────────────────────────────────
 app.get('/dice-stats', (req, res) => {
   const n = Math.min(Number(req.query.n) || 30, 200);
   if (history.length < 3) return res.status(503).json({ error: 'Chưa đủ dữ liệu' });
@@ -681,7 +608,6 @@ app.get('/dice-stats', (req, res) => {
   const { freq, hot, cold } = diceFrequency(history, n);
   const slice = history.slice(-n);
 
-  // Đếm loại phiên
   const typeCounts = { triple: 0, double: 0, sequence: 0, mixed: 0 };
   const recentDiceDetail = slice.reverse().slice(0, 20).map(h => {
     const cls = classifyDice(h.dice ? [...h.dice] : null);
@@ -710,14 +636,13 @@ app.get('/dice-stats', (req, res) => {
   });
 });
 
-// ── /markov-table ── (ENDPOINT MỚI) ──────────────────────────
+// ── /markov-table ─────────────────────────────────────────────
 app.get('/markov-table', (req, res) => {
   if (history.length < 5) return res.status(503).json({ error: 'Chưa đủ dữ liệu' });
 
   const seq    = history.map(h => h.ket_qua);
   const tables = buildMarkovTables(seq);
 
-  // Format cho dễ đọc
   const formatTable = (tbl) => {
     const out = {};
     for (const [k, v] of Object.entries(tbl)) {
