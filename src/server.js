@@ -1,15 +1,16 @@
 /**
  * ============================================================
  *  SIC BO PREDICTION API  —  DEV @sewdangcap
- *  v2.0 — Công Thức 68GB + Markov Bậc 1-2-3 + Dice Pattern
+ *  v2.1 — Công Thức 68GB + Markov Bậc 1-2-3 + Dice Pattern + Quy Tắc Chuỗi
  * ============================================================
  *
- *  NÂNG CẤP v2.0:
+ *  NÂNG CẤP v2.1:
  *  ✅ Markov Bậc 3 với trọng số phân tách rõ ràng
  *  ✅ Lưu dữ liệu xúc xắc đầy đủ (dice[0], dice[1], dice[2])
  *  ✅ Thuật toán Dice Pattern (Triple / Double / Sum-sequence)
  *  ✅ Dice Frequency Map — theo dõi tần suất từng giá trị mặt xúc xắc
- *  ✅ Kết hợp 4 tín hiệu: 68GB + Markov + DicePattern + DiceFreq
+ *  ✅ MODULE 5 MỚI: Quy Tắc Chuỗi 10 Rules (Nhóm 1/2/3)
+ *  ✅ Kết hợp 5 tín hiệu: 68GB + Markov + DicePattern + DiceFreq + ChuỗiRules
  * ============================================================
  */
 
@@ -276,7 +277,82 @@ function dicePatternPredict(hist) {
 }
 
 // ═══════════════════════════════════════════════════════════════
-//  MODULE 4 — KẾT HỢP 4 TÍN HIỆU
+//  MODULE 5 — QUY TẮC CHUỖI (10 Rules, 3 nhóm ưu tiên)
+//
+//  Quy ước đọc:
+//    T1 = kết quả mới nhất (hist[n-1])
+//    T2 = trước T1         (hist[n-2])
+//    T3 = trước T2         (hist[n-3])
+//    T4 = trước T3         (hist[n-4])
+//
+//  🔴 NHÓM 1: Chuỗi dài  — xét trước (rule 1-4)
+//  🟡 NHÓM 2: Chuỗi ngắn — xét thứ 2  (rule 5-9)
+//  🟢 NHÓM 3: Dự phòng   — xét cuối   (rule 10)
+// ═══════════════════════════════════════════════════════════════
+function applyChuoiRules(hist) {
+  const n = hist.length;
+  if (n < 2) return null;
+
+  // Lấy tổng T1..T4 (T1 = mới nhất)
+  const T1 = hist[n - 1].tong;
+  const T2 = n >= 2 ? hist[n - 2].tong : null;
+  const T3 = n >= 3 ? hist[n - 3].tong : null;
+  const T4 = n >= 4 ? hist[n - 4].tong : null;
+
+  // ── 🔴 NHÓM 1: Chuỗi dài ─────────────────────────────────
+
+  // Rule 1 — Mẫu 4 tay cố định: 11-17-16-13 → Bẻ Xỉu
+  if (T4 === 11 && T3 === 17 && T2 === 16 && T1 === 13)
+    return { du_doan: 'Xỉu', rule: 'CR-1', mo_ta: `ChuỗiR1: Mẫu 4 tay 11-17-16-13 → Bẻ Xỉu (dự đoán ~10)` };
+
+  // Rule 2 — Mẫu 4 tay: TàiLẻ-TàiLẻ-TàiChẵn-TàiChẵn → Theo tiếp Tài
+  if (T4 !== null && isTai(T4) && isLe(T4) &&
+      isTai(T3) && isLe(T3) &&
+      isTai(T2) && isChan(T2) &&
+      isTai(T1) && isChan(T1))
+    return { du_doan: 'Tài', rule: 'CR-2', mo_ta: `ChuỗiR2: Mẫu TàiLẻ×2 → TàiChẵn×2 (${T4}-${T3}-${T2}-${T1}) → Theo Tài` };
+
+  // Rule 3 — 2 Xỉu bệt → nhảy lên Tài Chẵn → Bẻ Xỉu
+  if (T3 !== null && isXiu(T3) && isXiu(T2) && isTai(T1) && isChan(T1))
+    return { du_doan: 'Xỉu', rule: 'CR-3', mo_ta: `ChuỗiR3: Xỉu-Xỉu → Tài Chẵn ${T1} → Bẻ Xỉu` };
+
+  // Rule 4 — 3 tay Xỉu liên tiếp → Bẻ Tài
+  if (T3 !== null && isXiu(T1) && isXiu(T2) && isXiu(T3))
+    return { du_doan: 'Tài', rule: 'CR-4', mo_ta: `ChuỗiR4: 3 Xỉu liên tiếp (${T3}-${T2}-${T1}) → Bẻ Tài` };
+
+  // ── 🟡 NHÓM 2: Chuỗi ngắn đặc biệt ─────────────────────
+
+  // Rule 5 — 2 Tài Chẵn, T1 < T2 (giảm dần) → Đánh tiếp Tài
+  if (T2 !== null && isTai(T2) && isChan(T2) && isTai(T1) && isChan(T1) && T1 < T2)
+    return { du_doan: 'Tài', rule: 'CR-5', mo_ta: `ChuỗiR5: Tài Chẵn giảm dần ${T2}→${T1} → Tiếp Tài (~11)` };
+
+  // Rule 6 — 2 Tài Chẵn, T1 >= T2 (ngang/tăng) → Bẻ Xỉu
+  if (T2 !== null && isTai(T2) && isChan(T2) && isTai(T1) && isChan(T1) && T1 >= T2)
+    return { du_doan: 'Xỉu', rule: 'CR-6', mo_ta: `ChuỗiR6: Tài Chẵn ngang/tăng ${T2}→${T1} → Bẻ Xỉu` };
+
+  // Rule 7 — Tài Chẵn (kể cả 16) → Tài 11 → Bẻ Xỉu
+  if (T2 !== null && isTai(T2) && isChan(T2) && T1 === 11)
+    return { du_doan: 'Xỉu', rule: 'CR-7', mo_ta: `ChuỗiR7: Tài Chẵn ${T2} → Tài 11 → Bẻ Xỉu` };
+
+  // Rule 8 — Tài Lẻ → Xỉu 10 → Bẻ Tài
+  if (T2 !== null && isTai(T2) && isLe(T2) && T1 === 10)
+    return { du_doan: 'Tài', rule: 'CR-8', mo_ta: `ChuỗiR8: Tài Lẻ ${T2} → Xỉu 10 → Bẻ Tài` };
+
+  // Rule 9 — Xỉu Lẻ → Xỉu Chẵn (kể cả 10) → Bẻ Tài
+  if (T2 !== null && isXiu(T2) && isLe(T2) && isXiu(T1) && isChan(T1))
+    return { du_doan: 'Tài', rule: 'CR-9', mo_ta: `ChuỗiR9: Xỉu Lẻ ${T2} → Xỉu Chẵn ${T1} → Bẻ Tài` };
+
+  // ── 🟢 NHÓM 3: Dự phòng ──────────────────────────────────
+
+  // Rule 10 — 2 Xỉu liên tiếp (không dính mẫu trên) → Bẻ Tài
+  if (T2 !== null && isXiu(T2) && isXiu(T1))
+    return { du_doan: 'Tài', rule: 'CR-10', mo_ta: `ChuỗiR10: 2 Xỉu (${T2}-${T1}) → Bẻ Tài` };
+
+  return null;
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  MODULE 4 — KẾT HỢP 5 TÍN HIỆU
 // ═══════════════════════════════════════════════════════════════
 function combinePrediction(hist) {
   if (hist.length < 2) return { du_doan: 'Tài', do_tin_cay: 50, method: 'default' };
@@ -284,9 +360,10 @@ function combinePrediction(hist) {
   const totals = hist.map(h => h.tong);
   const seq    = totals.map(label);
 
-  const r68  = apply68GB(totals);
-  const mrk  = markovPredict(seq);
-  const dice = dicePatternPredict(hist);
+  const r68   = apply68GB(totals);
+  const mrk   = markovPredict(seq);
+  const dice  = dicePatternPredict(hist);
+  const chuoi = applyChuoiRules(hist);   // MODULE 5
 
   const votes   = { T: 0, X: 0 };
   const signals = [];
@@ -307,6 +384,15 @@ function combinePrediction(hist) {
     votes[v] += 1;
     signals.push({ src: 'DicePattern', pred: dice.du_doan, conf: dice.do_tin_cay });
   }
+  if (chuoi) {
+    // ChuỗiRules: trọng số 2 (nhóm 1 và 2 cao hơn 68GB nhẹ, nhóm 3 thấp hơn)
+    const v  = chuoi.du_doan === 'Tài' ? 'T' : 'X';
+    const wt = ['CR-1','CR-2','CR-3','CR-4'].includes(chuoi.rule) ? 3  // nhóm 1 = ngang 68GB
+              : ['CR-5','CR-6','CR-7','CR-8','CR-9'].includes(chuoi.rule) ? 2 // nhóm 2
+              : 1; // nhóm 3 (dự phòng)
+    votes[v] += wt;
+    signals.push({ src: 'ChuỗiRules', pred: chuoi.du_doan, rule: chuoi.rule });
+  }
 
   const totalVotes  = votes.T + votes.X;
   if (totalVotes === 0) return { du_doan: 'Tài', do_tin_cay: 50, method: 'default' };
@@ -316,7 +402,7 @@ function combinePrediction(hist) {
   const agreement   = Math.round(winnerVotes / totalVotes * 100);
 
   let conf;
-  if (!r68 && !mrk && !dice) {
+  if (!r68 && !mrk && !dice && !chuoi) {
     conf = 50;
   } else if (r68 && mrk && mrk.du_doan === r68.du_doan) {
     conf = Math.min(92, Math.round((mrk.do_tin_cay + 75) / 2) + 10);
@@ -327,17 +413,30 @@ function combinePrediction(hist) {
   }
 
   let method;
-  if (r68 && mrk && dice) method = 'full-combo';
-  else if (r68 && mrk)    method = 'combo';
-  else if (r68)            method = '68gb';
-  else if (mrk)            method = 'markov';
-  else                     method = 'dice';
+  if (r68 && mrk && dice && chuoi) method = 'full-combo';
+  else if (r68 && mrk && chuoi)    method = 'combo+chuoi';
+  else if (r68 && mrk)             method = 'combo';
+  else if (chuoi && r68)           method = '68gb+chuoi';
+  else if (chuoi && mrk)           method = 'markov+chuoi';
+  else if (r68)                     method = '68gb';
+  else if (chuoi)                   method = 'chuoi';
+  else if (mrk)                     method = 'markov';
+  else                              method = 'dice';
+
+  // Ưu tiên mo_ta: chuoi nhóm 1 hoặc 68GB trước, rồi mới fallback
+  const bestMoTa = (['CR-1','CR-2','CR-3','CR-4'].includes(chuoi?.rule))
+    ? chuoi.mo_ta
+    : (r68 ? r68.mo_ta : (chuoi ? chuoi.mo_ta : (dice ? dice.mo_ta : `Markov ${mrk?.do_tin_cay}%`)));
+
+  const bestRule = (['CR-1','CR-2','CR-3','CR-4'].includes(chuoi?.rule))
+    ? chuoi.rule
+    : (r68 ? r68.rule : (chuoi ? chuoi.rule : (mrk ? 'Markov' : 'DicePattern')));
 
   return {
     du_doan:    winner,
     do_tin_cay: conf,
-    rule:       r68 ? r68.rule  : (mrk ? 'Markov' : 'DicePattern'),
-    mo_ta:      r68 ? r68.mo_ta : (dice ? dice.mo_ta : `Markov ${mrk?.do_tin_cay}%`),
+    rule:       bestRule,
+    mo_ta:      bestMoTa,
     method,
     votes,
     signals,
