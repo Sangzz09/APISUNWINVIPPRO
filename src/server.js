@@ -1,16 +1,15 @@
 /**
  * ============================================================
  *  SIC BO PREDICTION API  —  DEV @sewdangcap
- *  v2.1 — Công Thức 68GB + Markov Bậc 1-2-3 + Dice Pattern + Quy Tắc Chuỗi
+ *  v3.0 — Sunwin Rules + Markov Bậc 1-2-3 + Dice Pattern
  * ============================================================
  *
- *  NÂNG CẤP v2.1:
- *  ✅ Markov Bậc 3 với trọng số phân tách rõ ràng
- *  ✅ Lưu dữ liệu xúc xắc đầy đủ (dice[0], dice[1], dice[2])
- *  ✅ Thuật toán Dice Pattern (Triple / Double / Sum-sequence)
- *  ✅ Dice Frequency Map — theo dõi tần suất từng giá trị mặt xúc xắc
- *  ✅ MODULE 5 MỚI: Quy Tắc Chuỗi 10 Rules (Nhóm 1/2/3)
- *  ✅ Kết hợp 5 tín hiệu: 68GB + Markov + DicePattern + DiceFreq + ChuỗiRules
+ *  THAY ĐỔI v3.0:
+ *  ❌ Loại bỏ hoàn toàn Công Thức 68GB
+ *  ✅ MODULE 1 (CHÍNH): Quy Tắc Sunwin — 10 Rules (3 nhóm ưu tiên)
+ *  ✅ MODULE 2: Markov Chain Bậc 1-2-3 (hỗ trợ)
+ *  ✅ MODULE 3: Dice Pattern Analyzer (hỗ trợ)
+ *  ✅ Kết hợp 3 tín hiệu: SunwinRules + Markov + DicePattern
  * ============================================================
  */
 
@@ -20,7 +19,6 @@ const cors    = require('cors');
 const app  = express();
 const PORT = process.env.PORT || 3000;
 
-// ── SỬA: JSON nguồn có dạng [{"session":3100114,"dice":[1,1,5],"total":7,"ket_qua":"Xỉu"}]
 const SOURCE_API = 'https://apisunlichsu.onrender.com/api/taixiu/history';
 
 // ─── In-memory store ──────────────────────────────────────────
@@ -36,96 +34,114 @@ let history = [];
 let winLoss = [];
 
 // ─── Helpers cơ bản ───────────────────────────────────────────
-const isTai    = t => t >= 11 && t <= 18;
-const isXiu    = t => t >= 3  && t <= 10;
-const isChan   = t => t % 2 === 0;
-const isLe     = t => t % 2 !== 0;
-const label    = t => isTai(t) ? 'T' : 'X';
+const isTai   = t => t >= 11 && t <= 18;
+const isXiu   = t => t >= 3  && t <= 10;
+const isChan  = t => t % 2 === 0;
+const isLe    = t => t % 2 !== 0;
+const label   = t => isTai(t) ? 'T' : 'X';
 const fullLabel = t => isTai(t) ? 'Tài' : 'Xỉu';
 
 // ═══════════════════════════════════════════════════════════════
-//  MODULE 1 — CÔNG THỨC 68GB (giữ nguyên logic gốc)
+//  MODULE 1 — QUY TẮC SUNWIN (10 Rules, 3 nhóm ưu tiên)
+//
+//  Quy ước:
+//    T1 = kết quả mới nhất (hist[n-1])
+//    T2 = trước T1         (hist[n-2])
+//    T3 = trước T2         (hist[n-3])
+//    T4 = trước T3         (hist[n-4])
+//
+//  🔴 NHÓM 1: Chuỗi dài  — xét trước (rule 1-4)
+//  🟡 NHÓM 2: Chuỗi ngắn — xét thứ 2  (rule 5-9)
+//  🟢 NHÓM 3: Dự phòng   — xét cuối   (rule 10)
 // ═══════════════════════════════════════════════════════════════
-function apply68GB(totals) {
-  const n = totals.length;
+function applySunwinRules(hist) {
+  const n = hist.length;
   if (n < 2) return null;
 
-  const t0 = totals[n - 1];
-  const t1 = totals[n - 2];
-  const t2 = n >= 3 ? totals[n - 3] : null;
-  const t3 = n >= 4 ? totals[n - 4] : null;
+  const T1 = hist[n - 1].tong;
+  const T2 = n >= 2 ? hist[n - 2].tong : null;
+  const T3 = n >= 3 ? hist[n - 3].tong : null;
+  const T4 = n >= 4 ? hist[n - 4].tong : null;
 
-  // Rule 1.1 — Bộ 3 Xỉu Chẵn
-  if (n >= 3 && t0 === t1 && t1 === t2 && isXiu(t0) && isChan(t0)) {
-    if (t0 === 10) return { du_doan: 'Xỉu', rule: '1.1-NL', mo_ta: 'CT68 R1.1 Ngoại lệ 10-10-10 → Tiếp Xỉu' };
-    return { du_doan: 'Tài', rule: '1.1', mo_ta: `CT68 R1.1 Bộ 3 Xỉu Chẵn ${t0}×3 → Bẻ Tài` };
-  }
-  // Rule 1.2 — Bộ 3 Xỉu Lẻ
-  if (n >= 3 && t0 === t1 && t1 === t2 && isXiu(t0) && isLe(t0))
-    return { du_doan: 'Xỉu', rule: '1.2', mo_ta: `CT68 R1.2 Bộ 3 Xỉu Lẻ ${t0}×3 → Tiếp Xỉu` };
-  // Rule 1.3 — Max Tài
-  if (t0 === 16 || t0 === 17)
-    return { du_doan: 'Xỉu', rule: '1.3', mo_ta: `CT68 R1.3 Max Tài (${t0}) → Bẻ Xỉu` };
-  // Rule 1.4 — Kép 11 sau bệt Xỉu
-  if (n >= 4 && t0 === 11 && t1 === 11 && isXiu(t2) && isXiu(t3))
-    return { du_doan: 'Tài', rule: '1.4', mo_ta: `CT68 R1.4 Kép 11 sau bệt Xỉu → Tiếp Tài` };
+  // ── 🔴 NHÓM 1: Chuỗi dài ─────────────────────────────────
 
-  // Rule 2.x — Kép (cặp đôi)
-  if (t0 === t1) {
-    if (isXiu(t0) && isChan(t0)) return { du_doan: 'Xỉu', rule: '2.1', mo_ta: `CT68 R2.1 Kép Xỉu Chẵn ${t0}×2 → Tiếp Xỉu` };
-    if (isXiu(t0) && isLe(t0))   return { du_doan: 'Tài', rule: '2.2', mo_ta: `CT68 R2.2 Kép Xỉu Lẻ ${t0}×2 → Bẻ Tài` };
-    if (isTai(t0) && isChan(t0)) return { du_doan: 'Xỉu', rule: '2.3', mo_ta: `CT68 R2.3 Kép Tài Chẵn ${t0}×2 → Bẻ Xỉu` };
-    if (isTai(t0) && isLe(t0))   return { du_doan: 'Tài', rule: '2.4', mo_ta: `CT68 R2.4 Kép Tài Lẻ ${t0}×2 → Tiếp Tài` };
-  }
+  // Rule 1 — Mẫu 4 tay cố định: 11-17-16-13 → Bẻ Xỉu (dự đoán ~10)
+  if (T4 === 11 && T3 === 17 && T2 === 16 && T1 === 13)
+    return {
+      du_doan: 'Xỉu', rule: 'SW-1', nhom: 1,
+      mo_ta: `SunwinR1: Mẫu cố định 11-17-16-13 → Bẻ Xỉu (dự đoán ~10)`
+    };
 
-  // Rule 3.1 — Bệt 5
-  if (n >= 5) {
-    const last5 = totals.slice(n - 5);
-    if (last5.every(v => label(v) === label(last5[0])))
-      return { du_doan: isTai(t0) ? 'Xỉu' : 'Tài', rule: '3.1', mo_ta: `CT68 R3.1 Bệt 5 ${label(t0)} → Bẻ` };
-  }
-  // Rule 3.2 — Bệt suy yếu
-  if (n >= 3) {
-    let bietLen = 0, bietStart = null;
-    for (let i = n - 1; i >= 0; i--) {
-      if (label(totals[i]) === label(t0)) { bietLen++; if (bietStart === null) bietStart = totals[i]; }
-      else break;
-    }
-    if (bietLen >= 3 && t0 <= bietStart)
-      return { du_doan: isTai(t0) ? 'Xỉu' : 'Tài', rule: '3.2', mo_ta: `CT68 R3.2 Bệt suy yếu (${bietLen} tay) → Bẻ` };
-  }
+  // Rule 2 — Mẫu 4 tay: TàiLẻ-TàiLẻ-TàiChẵn-TàiChẵn → Theo tiếp Tài
+  if (T4 !== null &&
+      isTai(T4) && isLe(T4) &&
+      isTai(T3) && isLe(T3) &&
+      isTai(T2) && isChan(T2) &&
+      isTai(T1) && isChan(T1))
+    return {
+      du_doan: 'Tài', rule: 'SW-2', nhom: 1,
+      mo_ta: `SunwinR2: Mẫu TàiLẻ×2→TàiChẵn×2 (${T4}-${T3}-${T2}-${T1}) → Theo tiếp Tài`
+    };
 
-  // Rule 4.x — Cầu 1-1
-  if (n >= 3) {
-    if (isXiu(t0) && isTai(t1) && isXiu(t2) && t0 === t2)
-      return { du_doan: 'Tài', rule: '4.1', mo_ta: `CT68 R4.1 Cầu 1-1 đặc biệt ${t2}-${t1}-${t0} → Bệt Tài` };
-    if (isXiu(t0) && isTai(t1) && isXiu(t2) && t2 > t0)
-      return { du_doan: 'Xỉu', rule: '4.2', mo_ta: `CT68 R4.2 Phá cầu 1-1 (${t2}-${t1}-${t0}) → Bẻ Xỉu` };
-    if (isXiu(t0) && isTai(t1) && isXiu(t2))
-      return { du_doan: 'Tài', rule: '4.3', mo_ta: `CT68 R4.3 Tạo cầu 1-1 → Bẻ lên Tài` };
-  }
+  // Rule 3 — Xỉu bệt nhảy lên Tài Chẵn → Bẻ Xỉu
+  if (T3 !== null && isXiu(T3) && isXiu(T2) && isTai(T1) && isChan(T1))
+    return {
+      du_doan: 'Xỉu', rule: 'SW-3', nhom: 1,
+      mo_ta: `SunwinR3: Xỉu-Xỉu nhảy lên Tài Chẵn ${T1} → Bẻ xuống Xỉu`
+    };
 
-  // Rule 5.x — 2 Xỉu
-  if (isXiu(t0) && isXiu(t1)) {
-    if (isChan(t0) !== isChan(t1))
-      return { du_doan: 'Tài', rule: '5.1', mo_ta: `CT68 R5.1 2 Xỉu Chẵn/Lẻ xen (${t1}-${t0}) → Bẻ Tài` };
-    if (t0 < t1)
-      return { du_doan: 'Xỉu', rule: '5.2', mo_ta: `CT68 R5.2 Xỉu lùi (${t1}→${t0}) → Tiếp Xỉu` };
-  }
+  // Rule 4 — 3 Xỉu liên tiếp → Bẻ Tài
+  if (T3 !== null && isXiu(T1) && isXiu(T2) && isXiu(T3))
+    return {
+      du_doan: 'Tài', rule: 'SW-4', nhom: 1,
+      mo_ta: `SunwinR4: 3 Xỉu liên tiếp (${T3}-${T2}-${T1}) → Bẻ lên Tài`
+    };
 
-  // Rule 6.x — 2 Tài
-  if (isTai(t0) && isTai(t1)) {
-    const diff = t0 - t1;
-    if (diff < 0)
-      return { du_doan: 'Xỉu', rule: '6.1', mo_ta: `CT68 R6.1 Tài lùi (${t1}→${t0}) → Bẻ Xỉu` };
-    if (diff === 1) {
-      if (t2 !== null && t2 === t0)
-        return { du_doan: 'Tài', rule: '6.3-NL', mo_ta: `CT68 R6.3 NL Zíc zắc (${t2}-${t1}-${t0}) → Theo 2 Tài` };
-      return { du_doan: 'Xỉu', rule: '6.3', mo_ta: `CT68 R6.3 Tài tiến liền kề (${t1}→${t0}) → Bẻ Xỉu` };
-    }
-    if (diff >= 2)
-      return { du_doan: 'Tài', rule: '6.2', mo_ta: `CT68 R6.2 Tài tiến mạnh (${t1}→${t0}) → Tiếp Tài` };
-  }
+  // ── 🟡 NHÓM 2: Chuỗi ngắn đặc biệt ─────────────────────
+
+  // Rule 5 — Tài Chẵn giảm dần → Đánh tiếp Tài (~11)
+  if (T2 !== null && isTai(T2) && isChan(T2) && isTai(T1) && isChan(T1) && T1 < T2)
+    return {
+      du_doan: 'Tài', rule: 'SW-5', nhom: 2,
+      mo_ta: `SunwinR5: Tài Chẵn giảm dần ${T2}→${T1} → Tiếp Tài (dự đoán ~11)`
+    };
+
+  // Rule 6 — Tài Chẵn ngang/tăng → Bẻ Xỉu
+  if (T2 !== null && isTai(T2) && isChan(T2) && isTai(T1) && isChan(T1) && T1 >= T2)
+    return {
+      du_doan: 'Xỉu', rule: 'SW-6', nhom: 2,
+      mo_ta: `SunwinR6: Tài Chẵn ngang/tăng ${T2}→${T1} → Bẻ qua Xỉu`
+    };
+
+  // Rule 7 — Tài Chẵn (kể cả 16) → Tài 11 → Bẻ Xỉu
+  if (T2 !== null && isTai(T2) && isChan(T2) && T1 === 11)
+    return {
+      du_doan: 'Xỉu', rule: 'SW-7', nhom: 2,
+      mo_ta: `SunwinR7: Tài Chẵn ${T2} → Tài 11 → Bẻ xuống Xỉu`
+    };
+
+  // Rule 8 — Tài Lẻ → Xỉu 10 → Bẻ ngược Tài
+  if (T2 !== null && isTai(T2) && isLe(T2) && T1 === 10)
+    return {
+      du_doan: 'Tài', rule: 'SW-8', nhom: 2,
+      mo_ta: `SunwinR8: Tài Lẻ ${T2} → Xỉu 10 → Bẻ ngược lên Tài`
+    };
+
+  // Rule 9 — Xỉu Lẻ → Xỉu Chẵn (kể cả 10) → Bẻ Tài
+  if (T2 !== null && isXiu(T2) && isLe(T2) && isXiu(T1) && isChan(T1))
+    return {
+      du_doan: 'Tài', rule: 'SW-9', nhom: 2,
+      mo_ta: `SunwinR9: Xỉu Lẻ ${T2} → Xỉu Chẵn ${T1} → Bẻ lên Tài`
+    };
+
+  // ── 🟢 NHÓM 3: Dự phòng ──────────────────────────────────
+
+  // Rule 10 — 2 Xỉu liên tiếp (không khớp mẫu trên) → Bẻ Tài
+  if (T2 !== null && isXiu(T2) && isXiu(T1))
+    return {
+      du_doan: 'Tài', rule: 'SW-10', nhom: 3,
+      mo_ta: `SunwinR10: 2 Xỉu liên tiếp (${T2}-${T1}) → Bẻ Tài`
+    };
 
   return null;
 }
@@ -158,7 +174,7 @@ function buildMarkovTables(seq) {
   return tables;
 }
 
-const MARKOV_WEIGHTS   = { order3: 0.50, order2: 0.30, order1: 0.20 };
+const MARKOV_WEIGHTS    = { order3: 0.50, order2: 0.30, order1: 0.20 };
 const MARKOV_MIN_SAMPLE = 2;
 
 function markovPredict(seq) {
@@ -177,7 +193,11 @@ function markovPredict(seq) {
     scores.T += w * (m3.T / m3.total);
     scores.X += w * (m3.X / m3.total);
     totalWeight += w;
-    details.order3 = { key: k3, T: m3.T, X: m3.X, total: m3.total, probT: Math.round(m3.T / m3.total * 100), probX: Math.round(m3.X / m3.total * 100) };
+    details.order3 = {
+      key: k3, T: m3.T, X: m3.X, total: m3.total,
+      probT: Math.round(m3.T / m3.total * 100),
+      probX: Math.round(m3.X / m3.total * 100)
+    };
   }
 
   const k2 = seq[n - 2] + seq[n - 1];
@@ -187,7 +207,11 @@ function markovPredict(seq) {
     scores.T += w * (m2.T / m2.total);
     scores.X += w * (m2.X / m2.total);
     totalWeight += w;
-    details.order2 = { key: k2, T: m2.T, X: m2.X, total: m2.total, probT: Math.round(m2.T / m2.total * 100), probX: Math.round(m2.X / m2.total * 100) };
+    details.order2 = {
+      key: k2, T: m2.T, X: m2.X, total: m2.total,
+      probT: Math.round(m2.T / m2.total * 100),
+      probX: Math.round(m2.X / m2.total * 100)
+    };
   }
 
   const k1 = seq[n - 1];
@@ -197,7 +221,11 @@ function markovPredict(seq) {
     scores.T += w * (m1.T / m1.total);
     scores.X += w * (m1.X / m1.total);
     totalWeight += w;
-    details.order1 = { key: k1, T: m1.T, X: m1.X, total: m1.total, probT: Math.round(m1.T / m1.total * 100), probX: Math.round(m1.X / m1.total * 100) };
+    details.order1 = {
+      key: k1, T: m1.T, X: m1.X, total: m1.total,
+      probT: Math.round(m1.T / m1.total * 100),
+      probX: Math.round(m1.X / m1.total * 100)
+    };
   }
 
   if (totalWeight === 0) return null;
@@ -220,7 +248,7 @@ function markovPredict(seq) {
 // ═══════════════════════════════════════════════════════════════
 function classifyDice(dice) {
   if (!dice || dice.length !== 3) return { type: 'unknown', value: null };
-  const [a, b, c] = dice.sort((x, y) => x - y);
+  const [a, b, c] = [...dice].sort((x, y) => x - y);
 
   if (a === b && b === c)         return { type: 'triple',   value: a,    detail: `Triple ${a}` };
   if (a === b || b === c)         return { type: 'double',   value: b,    detail: `Double ${a === b ? a : b}` };
@@ -248,10 +276,10 @@ function diceFrequency(hist, n = 30) {
 function dicePatternPredict(hist) {
   if (hist.length < 5) return null;
 
-  const recent = hist.slice(-5);
-  const types  = recent.map(h => classifyDice(h.dice));
-
+  const recent     = hist.slice(-5);
+  const types      = recent.map(h => classifyDice(h.dice));
   const last3Types = types.slice(-3);
+
   if (last3Types.every(t => t.type === 'triple'))
     return { du_doan: 'Tài', do_tin_cay: 72, mo_ta: 'DicePattern: 3 Triple liên tiếp → đẩy Tài' };
 
@@ -260,7 +288,10 @@ function dicePatternPredict(hist) {
   if (allDouble) {
     const vals = last3.map(h => classifyDice(h.dice).value);
     if (vals[0] > vals[1] && vals[1] > vals[2])
-      return { du_doan: 'Xỉu', do_tin_cay: 68, mo_ta: `DicePattern: Double giảm dần ${vals[0]}→${vals[1]}→${vals[2]} → Xỉu` };
+      return {
+        du_doan: 'Xỉu', do_tin_cay: 68,
+        mo_ta: `DicePattern: Double giảm dần ${vals[0]}→${vals[1]}→${vals[2]} → Xỉu`
+      };
   }
 
   const { freq } = diceFrequency(hist, 20);
@@ -270,89 +301,17 @@ function dicePatternPredict(hist) {
   const high = (freq[5] + freq[6]) / totalRolls;
   const low  = (freq[1] + freq[2]) / totalRolls;
 
-  if (high > 0.46) return { du_doan: 'Tài', do_tin_cay: 63, mo_ta: `DicePattern: Mặt 5+6 hot (${Math.round(high * 100)}%) → Tài` };
-  if (low  > 0.46) return { du_doan: 'Xỉu', do_tin_cay: 63, mo_ta: `DicePattern: Mặt 1+2 hot (${Math.round(low  * 100)}%) → Xỉu` };
+  if (high > 0.46)
+    return { du_doan: 'Tài', do_tin_cay: 63, mo_ta: `DicePattern: Mặt 5+6 hot (${Math.round(high * 100)}%) → Tài` };
+  if (low  > 0.46)
+    return { du_doan: 'Xỉu', do_tin_cay: 63, mo_ta: `DicePattern: Mặt 1+2 hot (${Math.round(low  * 100)}%) → Xỉu` };
 
   return null;
 }
 
 // ═══════════════════════════════════════════════════════════════
-//  MODULE 5 — QUY TẮC CHUỖI (10 Rules, 3 nhóm ưu tiên)
-//
-//  Quy ước đọc:
-//    T1 = kết quả mới nhất (hist[n-1])
-//    T2 = trước T1         (hist[n-2])
-//    T3 = trước T2         (hist[n-3])
-//    T4 = trước T3         (hist[n-4])
-//
-//  🔴 NHÓM 1: Chuỗi dài  — xét trước (rule 1-4)
-//  🟡 NHÓM 2: Chuỗi ngắn — xét thứ 2  (rule 5-9)
-//  🟢 NHÓM 3: Dự phòng   — xét cuối   (rule 10)
-// ═══════════════════════════════════════════════════════════════
-function applyChuoiRules(hist) {
-  const n = hist.length;
-  if (n < 2) return null;
-
-  // Lấy tổng T1..T4 (T1 = mới nhất)
-  const T1 = hist[n - 1].tong;
-  const T2 = n >= 2 ? hist[n - 2].tong : null;
-  const T3 = n >= 3 ? hist[n - 3].tong : null;
-  const T4 = n >= 4 ? hist[n - 4].tong : null;
-
-  // ── 🔴 NHÓM 1: Chuỗi dài ─────────────────────────────────
-
-  // Rule 1 — Mẫu 4 tay cố định: 11-17-16-13 → Bẻ Xỉu
-  if (T4 === 11 && T3 === 17 && T2 === 16 && T1 === 13)
-    return { du_doan: 'Xỉu', rule: 'CR-1', mo_ta: `ChuỗiR1: Mẫu 4 tay 11-17-16-13 → Bẻ Xỉu (dự đoán ~10)` };
-
-  // Rule 2 — Mẫu 4 tay: TàiLẻ-TàiLẻ-TàiChẵn-TàiChẵn → Theo tiếp Tài
-  if (T4 !== null && isTai(T4) && isLe(T4) &&
-      isTai(T3) && isLe(T3) &&
-      isTai(T2) && isChan(T2) &&
-      isTai(T1) && isChan(T1))
-    return { du_doan: 'Tài', rule: 'CR-2', mo_ta: `ChuỗiR2: Mẫu TàiLẻ×2 → TàiChẵn×2 (${T4}-${T3}-${T2}-${T1}) → Theo Tài` };
-
-  // Rule 3 — 2 Xỉu bệt → nhảy lên Tài Chẵn → Bẻ Xỉu
-  if (T3 !== null && isXiu(T3) && isXiu(T2) && isTai(T1) && isChan(T1))
-    return { du_doan: 'Xỉu', rule: 'CR-3', mo_ta: `ChuỗiR3: Xỉu-Xỉu → Tài Chẵn ${T1} → Bẻ Xỉu` };
-
-  // Rule 4 — 3 tay Xỉu liên tiếp → Bẻ Tài
-  if (T3 !== null && isXiu(T1) && isXiu(T2) && isXiu(T3))
-    return { du_doan: 'Tài', rule: 'CR-4', mo_ta: `ChuỗiR4: 3 Xỉu liên tiếp (${T3}-${T2}-${T1}) → Bẻ Tài` };
-
-  // ── 🟡 NHÓM 2: Chuỗi ngắn đặc biệt ─────────────────────
-
-  // Rule 5 — 2 Tài Chẵn, T1 < T2 (giảm dần) → Đánh tiếp Tài
-  if (T2 !== null && isTai(T2) && isChan(T2) && isTai(T1) && isChan(T1) && T1 < T2)
-    return { du_doan: 'Tài', rule: 'CR-5', mo_ta: `ChuỗiR5: Tài Chẵn giảm dần ${T2}→${T1} → Tiếp Tài (~11)` };
-
-  // Rule 6 — 2 Tài Chẵn, T1 >= T2 (ngang/tăng) → Bẻ Xỉu
-  if (T2 !== null && isTai(T2) && isChan(T2) && isTai(T1) && isChan(T1) && T1 >= T2)
-    return { du_doan: 'Xỉu', rule: 'CR-6', mo_ta: `ChuỗiR6: Tài Chẵn ngang/tăng ${T2}→${T1} → Bẻ Xỉu` };
-
-  // Rule 7 — Tài Chẵn (kể cả 16) → Tài 11 → Bẻ Xỉu
-  if (T2 !== null && isTai(T2) && isChan(T2) && T1 === 11)
-    return { du_doan: 'Xỉu', rule: 'CR-7', mo_ta: `ChuỗiR7: Tài Chẵn ${T2} → Tài 11 → Bẻ Xỉu` };
-
-  // Rule 8 — Tài Lẻ → Xỉu 10 → Bẻ Tài
-  if (T2 !== null && isTai(T2) && isLe(T2) && T1 === 10)
-    return { du_doan: 'Tài', rule: 'CR-8', mo_ta: `ChuỗiR8: Tài Lẻ ${T2} → Xỉu 10 → Bẻ Tài` };
-
-  // Rule 9 — Xỉu Lẻ → Xỉu Chẵn (kể cả 10) → Bẻ Tài
-  if (T2 !== null && isXiu(T2) && isLe(T2) && isXiu(T1) && isChan(T1))
-    return { du_doan: 'Tài', rule: 'CR-9', mo_ta: `ChuỗiR9: Xỉu Lẻ ${T2} → Xỉu Chẵn ${T1} → Bẻ Tài` };
-
-  // ── 🟢 NHÓM 3: Dự phòng ──────────────────────────────────
-
-  // Rule 10 — 2 Xỉu liên tiếp (không dính mẫu trên) → Bẻ Tài
-  if (T2 !== null && isXiu(T2) && isXiu(T1))
-    return { du_doan: 'Tài', rule: 'CR-10', mo_ta: `ChuỗiR10: 2 Xỉu (${T2}-${T1}) → Bẻ Tài` };
-
-  return null;
-}
-
-// ═══════════════════════════════════════════════════════════════
-//  MODULE 4 — KẾT HỢP 5 TÍN HIỆU
+//  MODULE 4 — KẾT HỢP 3 TÍN HIỆU
+//  Thứ tự ưu tiên: SunwinRules → Markov → DicePattern
 // ═══════════════════════════════════════════════════════════════
 function combinePrediction(hist) {
   if (hist.length < 2) return { du_doan: 'Tài', do_tin_cay: 50, method: 'default' };
@@ -360,38 +319,36 @@ function combinePrediction(hist) {
   const totals = hist.map(h => h.tong);
   const seq    = totals.map(label);
 
-  const r68   = apply68GB(totals);
-  const mrk   = markovPredict(seq);
-  const dice  = dicePatternPredict(hist);
-  const chuoi = applyChuoiRules(hist);   // MODULE 5
+  const sunwin = applySunwinRules(hist);
+  const mrk    = markovPredict(seq);
+  const dice   = dicePatternPredict(hist);
 
   const votes   = { T: 0, X: 0 };
   const signals = [];
 
-  if (r68) {
-    const v = r68.du_doan === 'Tài' ? 'T' : 'X';
-    votes[v] += 3;
-    signals.push({ src: '68GB', pred: r68.du_doan, rule: r68.rule });
+  // SunwinRules: trọng số theo nhóm
+  if (sunwin) {
+    const v  = sunwin.du_doan === 'Tài' ? 'T' : 'X';
+    const wt = sunwin.nhom === 1 ? 4   // Nhóm 1: ưu tiên cao nhất
+              : sunwin.nhom === 2 ? 3   // Nhóm 2: ưu tiên cao
+              : 1;                      // Nhóm 3: dự phòng
+    votes[v] += wt;
+    signals.push({ src: 'SunwinRules', pred: sunwin.du_doan, rule: sunwin.rule, nhom: sunwin.nhom });
   }
+
+  // Markov
   if (mrk) {
     const v  = mrk.du_doan === 'Tài' ? 'T' : 'X';
     const wt = mrk.do_tin_cay >= 70 ? 2 : 1;
     votes[v] += wt;
     signals.push({ src: 'Markov', pred: mrk.du_doan, conf: mrk.do_tin_cay, details: mrk.details });
   }
+
+  // DicePattern
   if (dice) {
     const v = dice.du_doan === 'Tài' ? 'T' : 'X';
     votes[v] += 1;
     signals.push({ src: 'DicePattern', pred: dice.du_doan, conf: dice.do_tin_cay });
-  }
-  if (chuoi) {
-    // ChuỗiRules: trọng số 2 (nhóm 1 và 2 cao hơn 68GB nhẹ, nhóm 3 thấp hơn)
-    const v  = chuoi.du_doan === 'Tài' ? 'T' : 'X';
-    const wt = ['CR-1','CR-2','CR-3','CR-4'].includes(chuoi.rule) ? 3  // nhóm 1 = ngang 68GB
-              : ['CR-5','CR-6','CR-7','CR-8','CR-9'].includes(chuoi.rule) ? 2 // nhóm 2
-              : 1; // nhóm 3 (dự phòng)
-    votes[v] += wt;
-    signals.push({ src: 'ChuỗiRules', pred: chuoi.du_doan, rule: chuoi.rule });
   }
 
   const totalVotes  = votes.T + votes.X;
@@ -401,36 +358,42 @@ function combinePrediction(hist) {
   const winnerVotes = Math.max(votes.T, votes.X);
   const agreement   = Math.round(winnerVotes / totalVotes * 100);
 
+  // Tính độ tin cậy
   let conf;
-  if (!r68 && !mrk && !dice && !chuoi) {
+  if (!sunwin && !mrk && !dice) {
     conf = 50;
-  } else if (r68 && mrk && mrk.du_doan === r68.du_doan) {
-    conf = Math.min(92, Math.round((mrk.do_tin_cay + 75) / 2) + 10);
-  } else if (r68) {
-    conf = Math.max(58, Math.round(agreement * 0.8 + 15));
+  } else if (sunwin && mrk && mrk.du_doan === sunwin.du_doan) {
+    // Sunwin + Markov đồng thuận
+    const base = sunwin.nhom === 1 ? 85 : sunwin.nhom === 2 ? 78 : 65;
+    conf = Math.min(92, Math.round((mrk.do_tin_cay + base) / 2) + 5);
+  } else if (sunwin) {
+    // Chỉ Sunwin
+    const base = sunwin.nhom === 1 ? 75 : sunwin.nhom === 2 ? 68 : 58;
+    conf = Math.max(base, Math.round(agreement * 0.8 + 10));
   } else {
     conf = Math.max(52, Math.round(agreement * 0.75 + 10));
   }
 
+  // Xác định method
   let method;
-  if (r68 && mrk && dice && chuoi) method = 'full-combo';
-  else if (r68 && mrk && chuoi)    method = 'combo+chuoi';
-  else if (r68 && mrk)             method = 'combo';
-  else if (chuoi && r68)           method = '68gb+chuoi';
-  else if (chuoi && mrk)           method = 'markov+chuoi';
-  else if (r68)                     method = '68gb';
-  else if (chuoi)                   method = 'chuoi';
-  else if (mrk)                     method = 'markov';
-  else                              method = 'dice';
+  if (sunwin && mrk && dice) method = 'sunwin+markov+dice';
+  else if (sunwin && mrk)    method = 'sunwin+markov';
+  else if (sunwin && dice)   method = 'sunwin+dice';
+  else if (sunwin)           method = 'sunwin';
+  else if (mrk && dice)      method = 'markov+dice';
+  else if (mrk)              method = 'markov';
+  else                       method = 'dice';
 
-  // Ưu tiên mo_ta: chuoi nhóm 1 hoặc 68GB trước, rồi mới fallback
-  const bestMoTa = (['CR-1','CR-2','CR-3','CR-4'].includes(chuoi?.rule))
-    ? chuoi.mo_ta
-    : (r68 ? r68.mo_ta : (chuoi ? chuoi.mo_ta : (dice ? dice.mo_ta : `Markov ${mrk?.do_tin_cay}%`)));
+  // Ưu tiên mo_ta: Nhóm 1 Sunwin > Nhóm 2 > Markov > Dice
+  const bestMoTa = sunwin
+    ? sunwin.mo_ta
+    : mrk
+      ? `Markov ${mrk.do_tin_cay}% → ${mrk.du_doan}`
+      : dice?.mo_ta ?? 'Không đủ tín hiệu';
 
-  const bestRule = (['CR-1','CR-2','CR-3','CR-4'].includes(chuoi?.rule))
-    ? chuoi.rule
-    : (r68 ? r68.rule : (chuoi ? chuoi.rule : (mrk ? 'Markov' : 'DicePattern')));
+  const bestRule = sunwin
+    ? sunwin.rule
+    : mrk ? 'Markov' : 'DicePattern';
 
   return {
     du_doan:    winner,
@@ -441,9 +404,9 @@ function combinePrediction(hist) {
     votes,
     signals,
     markov_detail: mrk ? {
-      bac1: mrk.details.order1 || null,
-      bac2: mrk.details.order2 || null,
-      bac3: mrk.details.order3 || null,
+      bac1:   mrk.details.order1 || null,
+      bac2:   mrk.details.order2 || null,
+      bac3:   mrk.details.order3 || null,
       scores: mrk.scores
     } : null
   };
@@ -451,8 +414,6 @@ function combinePrediction(hist) {
 
 // ═══════════════════════════════════════════════════════════════
 //  FETCH & UPDATE
-//  ── CHỈ SỬA PHẦN NÀY để khớp JSON nguồn ──
-//  JSON nguồn: [{"session":3100114,"dice":[1,1,5],"total":7,"ket_qua":"Xỉu"}]
 // ═══════════════════════════════════════════════════════════════
 let pendingPrediction = null;
 
@@ -466,7 +427,6 @@ async function fetchAndUpdate() {
       return null;
     }
 
-    // ── SỬA: sort theo session (số phiên) ──
     const sorted = [...data].sort((a, b) => a.session - b.session);
     const latest = sorted[sorted.length - 1];
 
@@ -476,7 +436,6 @@ async function fetchAndUpdate() {
       const phien = String(item.session);
       if (existingSessions.has(phien)) continue;
 
-      // ── SỬA: đọc dice và total đúng field ──
       const diceArr = Array.isArray(item.dice) && item.dice.length === 3
         ? item.dice.map(Number)
         : null;
@@ -485,20 +444,14 @@ async function fetchAndUpdate() {
         ? item.total
         : (diceArr ? diceArr.reduce((a, b) => a + b, 0) : 0);
 
-      // ── SỬA: ket_qua từ nguồn là "Tài"/"Xỉu" → convert sang T/X ──
       const ketQua = item.ket_qua === 'Tài' ? 'T'
                    : item.ket_qua === 'Xỉu' ? 'X'
-                   : label(tong); // fallback: tính từ tổng
+                   : label(tong);
 
-      history.push({
-        phien,
-        dice:    diceArr,
-        tong,
-        ket_qua: ketQua
-      });
+      history.push({ phien, dice: diceArr, tong, ket_qua: ketQua });
       existingSessions.add(phien);
 
-      // ── Kiểm tra win/loss cho pending prediction ──
+      // Kiểm tra win/loss cho pending
       if (pendingPrediction && String(pendingPrediction.phien_du_doan) === phien) {
         const win = pendingPrediction.du_doan_raw === ketQua;
         winLoss.push({
@@ -516,7 +469,6 @@ async function fetchAndUpdate() {
 
     if (history.length > 200) history = history.slice(-200);
 
-    // ── Tính dự đoán ──
     const predict   = combinePrediction(history);
     const pattern   = history.slice(-25).map(h => h.ket_qua).join('').toLowerCase();
     const phienNext = String(latest.session + 1);
@@ -530,12 +482,11 @@ async function fetchAndUpdate() {
       method:        predict.method
     };
 
-    // ── SỬA: total phiên mới nhất đọc từ item.total ──
     const latestTotal = typeof latest.total === 'number'
       ? latest.total
       : (Array.isArray(latest.dice) ? latest.dice.reduce((a, b) => a + b, 0) : 0);
 
-    const latestDice    = Array.isArray(latest.dice) ? latest.dice : null;
+    const latestDice     = Array.isArray(latest.dice) ? latest.dice : null;
     const latestDiceInfo = latestDice ? classifyDice([...latestDice]) : null;
 
     return {
@@ -586,7 +537,7 @@ app.get('/', (req, res) => {
 <head>
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1"/>
-<title>API Tool Tài Xỉu Sunwin v2.0 — DEV @sewdangcap</title>
+<title>API Tool Tài Xỉu Sunwin v3.0 — DEV @sewdangcap</title>
 <style>
   *{box-sizing:border-box;margin:0;padding:0}
   body{background:#0d1117;color:#e6edf3;font-family:'Segoe UI',sans-serif;min-height:100vh;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:24px}
@@ -599,19 +550,36 @@ app.get('/', (req, res) => {
   .card h2{font-size:1.1rem;margin-bottom:8px;color:#58a6ff}
   .card p{font-size:.82rem;color:#8b949e;line-height:1.6}
   .badge{display:inline-block;background:#238636;color:#fff;font-size:.7rem;padding:2px 8px;border-radius:20px;margin-bottom:10px}
+  .badge.hot{background:#da3633}
   .badge.new{background:#9a3fb9}
   footer{margin-top:48px;color:#484f58;font-size:.8rem}
+  .algo{background:#161b22;border:1px solid #30363d;border-radius:12px;padding:20px;width:100%;max-width:860px;margin-bottom:24px}
+  .algo h3{color:#f0883e;margin-bottom:12px;font-size:.95rem}
+  .algo ul{padding-left:18px;color:#8b949e;font-size:.82rem;line-height:2}
+  .algo .g1{color:#ff7b72} .algo .g2{color:#e3b341} .algo .g3{color:#3fb950}
 </style>
 </head>
 <body>
 <h1>🎲 API Tool Tài Xỉu Sunwin</h1>
 <p class="sub">DEV @sewdangcap</p>
-<p class="ver">v2.0 — 68GB + Markov Bậc 1-2-3 + Dice Pattern</p>
+<p class="ver">v3.0 — Sunwin Rules (10 quy tắc) + Markov Bậc 1-2-3 + Dice Pattern</p>
+
+<div class="algo">
+  <h3>🧠 Thuật toán đang chạy</h3>
+  <ul>
+    <li><span class="g1">🔴 NHÓM 1 (Ưu tiên cao nhất, trọng số 4):</span> Quy tắc 1-4 — Chuỗi dài</li>
+    <li><span class="g2">🟡 NHÓM 2 (Ưu tiên cao, trọng số 3):</span> Quy tắc 5-9 — Chuỗi ngắn đặc biệt</li>
+    <li><span class="g3">🟢 NHÓM 3 (Dự phòng, trọng số 1):</span> Quy tắc 10 — Cơ bản</li>
+    <li>+ Markov Chain Bậc 1/2/3 (hỗ trợ, trọng số 1-2)</li>
+    <li>+ Dice Pattern Analyzer (hỗ trợ, trọng số 1)</li>
+  </ul>
+</div>
+
 <div class="grid">
   <a class="card" href="/sunlon">
-    <span class="badge">JSON</span>
+    <span class="badge hot">MAIN</span>
     <h2>⚡ /sunlon</h2>
-    <p>Dự đoán realtime. Kết hợp 4 tín hiệu: 68GB + Markov bậc 3 + Dice Pattern + Vote system</p>
+    <p>Dự đoán realtime. Kết hợp SunwinRules + Markov bậc 3 + Dice Pattern</p>
   </a>
   <a class="card" href="/history">
     <span class="badge">JSON</span>
@@ -679,7 +647,10 @@ app.get('/thangthua', (req, res) => {
   const methodRate = {};
   for (const [m, s] of Object.entries(methodStats)) {
     const total = s.win + s.lose;
-    methodRate[m] = { win: s.win, lose: s.lose, win_rate: Math.round(s.win / total * 100) + '%' };
+    methodRate[m] = {
+      win: s.win, lose: s.lose,
+      win_rate: Math.round(s.win / total * 100) + '%'
+    };
   }
 
   res.json({
@@ -708,22 +679,30 @@ app.get('/dice-stats', (req, res) => {
   const slice = history.slice(-n);
 
   const typeCounts = { triple: 0, double: 0, sequence: 0, mixed: 0 };
-  const recentDiceDetail = slice.reverse().slice(0, 20).map(h => {
+  const recentDiceDetail = [...slice].reverse().slice(0, 20).map(h => {
     const cls = classifyDice(h.dice ? [...h.dice] : null);
     if (cls.type in typeCounts) typeCounts[cls.type]++;
-    return { phien: h.phien, xuc_xac: h.dice, phan_loai: cls.detail, ket_qua: h.ket_qua === 'T' ? 'Tài' : 'Xỉu' };
+    return {
+      phien:    h.phien,
+      xuc_xac:  h.dice,
+      phan_loai: cls.detail,
+      ket_qua:  h.ket_qua === 'T' ? 'Tài' : 'Xỉu'
+    };
   });
 
   const totalRolls = Object.values(freq).reduce((a, b) => a + b, 0);
   const freqPct = {};
   for (const [k, v] of Object.entries(freq))
-    freqPct[k] = { count: v, pct: totalRolls > 0 ? Math.round(v / totalRolls * 100) + '%' : '0%' };
+    freqPct[k] = {
+      count: v,
+      pct: totalRolls > 0 ? Math.round(v / totalRolls * 100) + '%' : '0%'
+    };
 
   res.json({
     phan_tich_trong: `${n} phiên gần nhất`,
-    tan_suat_mat: freqPct,
-    mat_hot: hot,
-    mat_cold: cold,
+    tan_suat_mat:    freqPct,
+    mat_hot:         hot,
+    mat_cold:        cold,
     ty_le_loai: {
       triple:   { count: typeCounts.triple,   pct: Math.round(typeCounts.triple   / slice.length * 100) + '%' },
       double:   { count: typeCounts.double,   pct: Math.round(typeCounts.double   / slice.length * 100) + '%' },
@@ -776,11 +755,12 @@ app.use((req, res) =>
 // ── START ─────────────────────────────────────────────────────
 app.listen(PORT, () =>
   console.log(`
-🎲 API Tool Tài Xỉu Sunwin v2.0 — DEV @sewdangcap
+🎲 API Tool Tài Xỉu Sunwin v3.0 — DEV @sewdangcap
    http://localhost:${PORT}
    Polling: ${SOURCE_API}
 
-   Modules: 68GB + Markov Bậc 1-2-3 + Dice Pattern + Dice Frequency
-   New endpoints: /dice-stats  /markov-table
+   Modules: SunwinRules (10 quy tắc, 3 nhóm) + Markov Bậc 1-2-3 + Dice Pattern
+   ❌ Đã loại bỏ: Công Thức 68GB
+   Endpoints: /sunlon  /history  /thangthua  /dice-stats  /markov-table
 `)
 );
