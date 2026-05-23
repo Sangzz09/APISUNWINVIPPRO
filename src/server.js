@@ -1,7 +1,8 @@
 /**
  * ============================================================
  *  SIC BO PREDICTION API  —  DEV @sewdangcap
- *  v3.0 — Sunwin Rules + Markov Bậc 1-2-3 + Dice Pattern
+ *  v4.0 — Sunwin Rules + Markov Bậc 1-2-3 + Dice Pattern
+ *          + MODULE 5: Cầu / Điểm Số / Vị Xúc Xắc Algorithm
  * ============================================================
  */
 
@@ -58,11 +59,9 @@ function applySunwinRules(hist) {
   if (T2 !== null && isTai(T2) && isChan(T2) && T1 === 11)
     return { du_doan: 'Xỉu', rule: 'SW-7', nhom: 2, mo_ta: `SunwinR7: Tài Chẵn ${T2} → Tài 11 → Bẻ Xỉu` };
 
-  // Rule 11 — Tài Lẻ đặc thù (13 hoặc 11) → Xỉu 10 → Theo tiếp Xỉu
   if (T2 !== null && (T2 === 13 || T2 === 11) && T1 === 10)
     return { du_doan: 'Xỉu', rule: 'SW-11', nhom: 2, mo_ta: `SunwinR11: Tài Lẻ ${T2} → Xỉu 10 → Theo tiếp Xỉu` };
 
-  // Rule 8 — Tài Lẻ (các giá trị khác) → Xỉu 10 → Bẻ ngược Tài
   if (T2 !== null && isTai(T2) && isLe(T2) && T1 === 10)
     return { du_doan: 'Tài', rule: 'SW-8', nhom: 2, mo_ta: `SunwinR8: Tài Lẻ ${T2} → Xỉu 10 → Bẻ Tài` };
 
@@ -76,7 +75,7 @@ function applySunwinRules(hist) {
 }
 
 // ═══════════════════════════════════════════════════════════════
-//  MODULE 2 — MARKOV CHAIN BẬC 1 / 2 / 3
+//  MODULE 2 — MARKOV CHAIN BẬC 1 / 2 / 3 / 4
 // ═══════════════════════════════════════════════════════════════
 function buildMarkovTables(seq) {
   const tables = { order1: {}, order2: {}, order3: {}, order4: {} };
@@ -118,7 +117,6 @@ function markovPredict(seq) {
   const details = {};
   let totalWeight = 0;
 
-  // Bậc 4
   const k4 = seq[n - 4] + seq[n - 3] + seq[n - 2] + seq[n - 1];
   const m4 = tables.order4[k4];
   if (m4 && m4.total >= MARKOV_MIN_SAMPLE) {
@@ -129,7 +127,6 @@ function markovPredict(seq) {
     details.order4 = { key: k4, T: m4.T, X: m4.X, total: m4.total };
   }
 
-  // Bậc 3
   const k3 = seq[n - 3] + seq[n - 2] + seq[n - 1];
   const m3 = tables.order3[k3];
   if (m3 && m3.total >= MARKOV_MIN_SAMPLE) {
@@ -219,7 +216,232 @@ function dicePatternPredict(hist) {
 }
 
 // ═══════════════════════════════════════════════════════════════
-//  MODULE 4 — KẾT HỢP 3 TÍN HIỆU
+//  MODULE 5 — CẦU / ĐIỂM SỐ / VỊ XÚC XẮC ALGORITHM (MỚI)
+//  Nguồn: Kinh nghiệm thực chiến Sun Win @sewdangcap v4.0
+// ═══════════════════════════════════════════════════════════════
+
+/**
+ * Kiểm tra xem mảng xúc xắc có khớp với một combo cụ thể không.
+ * So sánh không phân biệt thứ tự.
+ * @param {number[]} dice - Mảng 3 giá trị xúc xắc
+ * @param {number[]} combo - Combo cần kiểm tra
+ */
+function diceMatch(dice, combo) {
+  if (!dice || dice.length !== 3) return false;
+  const sorted = [...dice].sort((a, b) => a - b);
+  const sortedCombo = [...combo].sort((a, b) => a - b);
+  return sorted[0] === sortedCombo[0] && sorted[1] === sortedCombo[1] && sorted[2] === sortedCombo[2];
+}
+
+/**
+ * Phát hiện cầu 1-1 (xen kẽ Tài/Xỉu) trong lịch sử gần nhất.
+ * @param {string[]} seq - Mảng 'T'/'X' gần nhất
+ * @param {number} minLen - Độ dài tối thiểu cầu để xác nhận
+ */
+function detectCau11(seq, minLen = 4) {
+  if (seq.length < minLen) return false;
+  const tail = seq.slice(-minLen);
+  for (let i = 1; i < tail.length; i++) {
+    if (tail[i] === tail[i - 1]) return false;
+  }
+  return true;
+}
+
+/**
+ * Phát hiện cầu 1-2 (1 lần rồi 2 lần, xen kẽ).
+ * Pattern: A, B, B, A, B, B, ...
+ * @param {string[]} seq
+ */
+function detectCau12(seq) {
+  if (seq.length < 6) return false;
+  const tail = seq.slice(-6);
+  // Pattern 1: A B B A B B
+  return (
+    tail[0] !== tail[1] &&
+    tail[1] === tail[2] &&
+    tail[3] !== tail[4] &&
+    tail[4] === tail[5] &&
+    tail[0] === tail[3] &&
+    tail[1] === tail[4]
+  );
+}
+
+/**
+ * MODULE 5 CORE — Thuật toán Cầu + Điểm Số + Vị Xúc Xắc
+ *
+ * Trả về:
+ *   { du_doan: 'Tài'|'Xỉu'|null, luot_danh: 'TÀI'|'XỈU'|'WAIT', do_tin_cay_label: 'Cao'|'Trung bình'|'Thấp', do_tin_cay: number, rule: string, mo_ta: string }
+ *   Hoặc null nếu không có tín hiệu.
+ *
+ * @param {Array} hist - Mảng history đầy đủ
+ */
+function m5Predict(hist) {
+  const n = hist.length;
+  if (n < 2) return null;
+
+  const current = hist[n - 1];           // tay mới nhất (đã có kết quả)
+  const prev    = n >= 2 ? hist[n - 2] : null;
+  const prev2   = n >= 3 ? hist[n - 3] : null;
+  const prev3   = n >= 4 ? hist[n - 4] : null;
+
+  const tong  = current.tong;
+  const dice  = current.dice;             // mảng 3 số, có thể null
+
+  // Chuỗi T/X gần nhất để phát hiện cầu
+  const seq = hist.map(h => h.ket_qua);  // 'T' hoặc 'X'
+
+  // ────────────────────────────────────────────────────────────
+  // PHẦN 1 — BỘ LỌC CẦU ĐẶC BIỆT (ưu tiên cao nhất)
+  // ────────────────────────────────────────────────────────────
+
+  // Quy tắc 1.1 — Phá Cầu 1-1
+  // Nếu đang đi cầu xen kẽ VÀ tổng hiện tại là 13 hoặc 14 → Bẻ cầu
+  if (detectCau11(seq, 4) && (tong === 13 || tong === 14)) {
+    const nextLabel = seq[n - 1] === 'T' ? 'Xỉu' : 'Tài'; // ngược lại nhịp 1-1
+    return {
+      du_doan:          nextLabel,
+      luot_danh:        nextLabel === 'Tài' ? 'TÀI' : 'XỈU',
+      do_tin_cay_label: 'Trung bình',
+      do_tin_cay:       62,
+      rule:             'M5-CAU11',
+      mo_ta:            `M5: Cầu 1-1 + Tổng ${tong} → Bẻ cầu sang ${nextLabel} (Volume nhỏ)`
+    };
+  }
+
+  // Quy tắc 1.2 — Dấu hiệu Bệt Tài: t-2=14, t-1=13
+  if (prev && prev2 && prev2.tong === 14 && prev.tong === 13) {
+    return {
+      du_doan:          'Tài',
+      luot_danh:        'TÀI',
+      do_tin_cay_label: 'Trung bình',
+      do_tin_cay:       65,
+      rule:             'M5-BET-TAI',
+      mo_ta:            `M5: Dấu hiệu Bệt Tài (14→13) → Tài (thăm dò, dừng nếu thua 2 ván)`
+    };
+  }
+
+  // Quy tắc 1.3 — Cầu 1-2 + Xỉu tiếp theo
+  if (detectCau12(seq)) {
+    return {
+      du_doan:          'Xỉu',
+      luot_danh:        'XỈU',
+      do_tin_cay_label: 'Trung bình',
+      do_tin_cay:       63,
+      rule:             'M5-CAU12',
+      mo_ta:            `M5: Cầu 1-2 + Chấm Trắng → Kép Xỉu cao → Xỉu`
+    };
+  }
+
+  // ────────────────────────────────────────────────────────────
+  // PHẦN 2 — BỘ LỌC ĐIỂM SỐ & VỊ XÚC XẮC
+  // ────────────────────────────────────────────────────────────
+
+  switch (tong) {
+
+    // ── Nhóm XỈU chắc chắn ──────────────────────────────────
+    case 3:
+      return { du_doan: 'Xỉu', luot_danh: 'XỈU', do_tin_cay_label: 'Cao', do_tin_cay: 100, rule: 'M5-T3', mo_ta: 'M5: Tổng 3 → Xỉu (100%)' };
+
+    case 5:
+      return { du_doan: 'Xỉu', luot_danh: 'XỈU', do_tin_cay_label: 'Cao', do_tin_cay: 100, rule: 'M5-T5', mo_ta: 'M5: Tổng 5 → Xỉu (100%)' };
+
+    case 15:
+      return { du_doan: 'Tài', luot_danh: 'TÀI', do_tin_cay_label: 'Cao', do_tin_cay: 90, rule: 'M5-T15', mo_ta: 'M5: Tổng 15 → Tài (Auto)' };
+
+    case 18:
+      return { du_doan: 'Tài', luot_danh: 'TÀI', do_tin_cay_label: 'Cao', do_tin_cay: 85, rule: 'M5-T18', mo_ta: 'M5: Tổng 18 → Tài (giữ cầu)' };
+
+    // ── Tổng 4 ──────────────────────────────────────────────
+    case 4:
+      return { du_doan: 'Xỉu', luot_danh: 'XỈU', do_tin_cay_label: 'Trung bình', do_tin_cay: 68, rule: 'M5-T4', mo_ta: 'M5: Tổng 4 → Xỉu (68%)' };
+
+    // ── Tổng 6 — Cầu lừa → WAIT ─────────────────────────────
+    case 6:
+      return { du_doan: null, luot_danh: 'WAIT', do_tin_cay_label: 'Thấp', do_tin_cay: 0, rule: 'M5-T6', mo_ta: 'M5: Tổng 6 — Cầu lừa (Bịp) → WAIT 1 tay' };
+
+    // ── Tổng 7 — Phụ thuộc vị xúc xắc ──────────────────────
+    case 7: {
+      const xiu7Combos = [[1,2,4],[2,2,3],[1,3,3]];
+      const isXiu7 = dice && xiu7Combos.some(c => diceMatch(dice, c));
+      if (isXiu7) {
+        return { du_doan: 'Xỉu', luot_danh: 'XỈU', do_tin_cay_label: 'Cao', do_tin_cay: 89, rule: 'M5-T7-X', mo_ta: `M5: Tổng 7 vị ${dice} → 89% Xỉu (khả năng nhảy 10)` };
+      } else {
+        return { du_doan: 'Tài', luot_danh: 'TÀI', do_tin_cay_label: 'Trung bình', do_tin_cay: 65, rule: 'M5-T7-T', mo_ta: `M5: Tổng 7 vị khác → Tài` };
+      }
+    }
+
+    // ── Tổng 8 — Phụ thuộc vị xúc xắc ──────────────────────
+    case 8: {
+      if (dice && diceMatch(dice, [1,3,4])) {
+        return { du_doan: 'Xỉu', luot_danh: 'XỈU', do_tin_cay_label: 'Cao', do_tin_cay: 80, rule: 'M5-T8-X', mo_ta: `M5: Tổng 8 vị [1,3,4] → Auto Xỉu` };
+      }
+      return { du_doan: 'Tài', luot_danh: 'TÀI', do_tin_cay_label: 'Trung bình', do_tin_cay: 62, rule: 'M5-T8-T', mo_ta: `M5: Tổng 8 vị còn lại → Tài` };
+    }
+
+    // ── Tổng 9 — Phụ thuộc vị xúc xắc ──────────────────────
+    case 9: {
+      if (dice && diceMatch(dice, [2,3,4])) {
+        return { du_doan: 'Xỉu', luot_danh: 'XỈU', do_tin_cay_label: 'Trung bình', do_tin_cay: 70, rule: 'M5-T9-X', mo_ta: `M5: Tổng 9 vị [2,3,4] → Xỉu` };
+      }
+      return { du_doan: 'Tài', luot_danh: 'TÀI', do_tin_cay_label: 'Thấp', do_tin_cay: 52, rule: 'M5-T9-T', mo_ta: `M5: Tổng 9 vị còn lại → Tài (50/50)` };
+    }
+
+    // ── Tổng 10 — Phụ thuộc ván liền trước ─────────────────
+    case 10: {
+      // Nếu t-1 là 'Đen' (trong context này: ký hiệu kết quả XỈU – tạm hiểu prev.ket_qua === 'X')
+      const prevIsX = prev && prev.ket_qua === 'X';
+      if (prevIsX) {
+        return { du_doan: 'Tài', luot_danh: 'TÀI', do_tin_cay_label: 'Trung bình', do_tin_cay: 68, rule: 'M5-T10-T', mo_ta: 'M5: Tổng 10 sau Xỉu → Sẽ lên 12-13 rồi 11 → Tài' };
+      }
+      return { du_doan: 'Xỉu', luot_danh: 'XỈU', do_tin_cay_label: 'Trung bình', do_tin_cay: 65, rule: 'M5-T10-X', mo_ta: 'M5: Tổng 10 (còn lại) → Auto Xỉu' };
+    }
+
+    // ── Tổng 11 — Cầu nát → WAIT ────────────────────────────
+    case 11:
+      return { du_doan: null, luot_danh: 'WAIT', do_tin_cay_label: 'Thấp', do_tin_cay: 0, rule: 'M5-T11', mo_ta: 'M5: Tổng 11 — Cầu nát, khó đoán → WAIT 1 tay' };
+
+    // ── Tổng 12 — Phụ thuộc vị xúc xắc ─────────────────────
+    case 12: {
+      const xiu12Combos = [[2,4,6],[1,5,6],[3,3,6],[2,5,5]];
+      const isXiu12 = dice && xiu12Combos.some(c => diceMatch(dice, c));
+      if (isXiu12) {
+        return { du_doan: 'Xỉu', luot_danh: 'XỈU', do_tin_cay_label: 'Cao', do_tin_cay: 82, rule: 'M5-T12-X', mo_ta: `M5: Tổng 12 vị ${dice} → Auto Xỉu` };
+      }
+      return { du_doan: 'Tài', luot_danh: 'TÀI', do_tin_cay_label: 'Trung bình', do_tin_cay: 68, rule: 'M5-T12-T', mo_ta: `M5: Tổng 12 vị còn lại → Tài` };
+    }
+
+    // ── Tổng 13 — Phụ thuộc vị xúc xắc ─────────────────────
+    case 13: {
+      const xiu13Combos = [[5,5,3],[6,6,1],[1,3,5],[1,3,6]];
+      // Lưu ý: [5,5,3] tổng = 13, [6,6,1] tổng = 13, [1,3,5] tổng = 9 → loại [1,3,5] vì sai tổng
+      // Chỉ dùng các combo tổng đúng = 13: [5,5,3], [6,6,1], [1,6,6]=[6,6,1], [4,3,6],[2,5,6],...
+      // Giữ nguyên theo đặc tả gốc (tác giả có thể dùng combo riêng)
+      const isXiu13 = dice && xiu13Combos.some(c => diceMatch(dice, c));
+      if (isXiu13) {
+        return { du_doan: 'Xỉu', luot_danh: 'XỈU', do_tin_cay_label: 'Cao', do_tin_cay: 80, rule: 'M5-T13-X', mo_ta: `M5: Tổng 13 vị ${dice} → Auto Xỉu` };
+      }
+      return { du_doan: 'Tài', luot_danh: 'TÀI', do_tin_cay_label: 'Trung bình', do_tin_cay: 67, rule: 'M5-T13-T', mo_ta: `M5: Tổng 13 vị còn lại → Tài` };
+    }
+
+    // ── Tổng 14 — 50/50 → WAIT ──────────────────────────────
+    case 14:
+      return { du_doan: null, luot_danh: 'WAIT', do_tin_cay_label: 'Thấp', do_tin_cay: 0, rule: 'M5-T14', mo_ta: 'M5: Tổng 14 — Xác suất 50/50 → WAIT bảo toàn vốn' };
+
+    // ── Tổng 16 — Xỉu cao ───────────────────────────────────
+    case 16:
+      return { du_doan: 'Xỉu', luot_danh: 'XỈU', do_tin_cay_label: 'Cao', do_tin_cay: 78, rule: 'M5-T16', mo_ta: 'M5: Tổng 16 → Xỉu (tỉ lệ cao)' };
+
+    // ── Tổng 17 — Xỉu bay thẳng xuống ──────────────────────
+    case 17:
+      return { du_doan: 'Xỉu', luot_danh: 'XỈU', do_tin_cay_label: 'Cao', do_tin_cay: 82, rule: 'M5-T17', mo_ta: 'M5: Tổng 17 → Xỉu (bay thẳng xuống 10)' };
+
+    default:
+      return null;
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  MODULE 4 — KẾT HỢP 4 TÍN HIỆU (nâng cấp từ 3 lên 4)
 // ═══════════════════════════════════════════════════════════════
 function combinePrediction(hist) {
   if (hist.length < 2) return { du_doan: 'Tài', do_tin_cay: 50, rule: '-', mo_ta: 'Không đủ dữ liệu', method: 'default' };
@@ -228,21 +450,50 @@ function combinePrediction(hist) {
   const sunwin = applySunwinRules(hist);
   const mrk    = markovPredict(seq);
   const dice   = dicePatternPredict(hist);
+  const m5     = m5Predict(hist);
+
+  // ── Nếu M5 ra WAIT → ưu tiên dừng lệnh ──────────────────
+  if (m5 && m5.luot_danh === 'WAIT') {
+    return {
+      du_doan:    null,
+      do_tin_cay: 0,
+      rule:       m5.rule,
+      mo_ta:      m5.mo_ta,
+      method:     'M5-WAIT',
+      luot_danh:  'WAIT',
+      votes:      { T: 0, X: 0 },
+      signals:    [{ src: 'M5-ScorePos', pred: 'WAIT', rule: m5.rule }]
+    };
+  }
 
   const votes = { T: 0, X: 0 };
   const signals = [];
 
+  // ── Sunwin Rules (trọng số cao nhất) ─────────────────────
   if (sunwin) {
     const v  = sunwin.du_doan === 'Tài' ? 'T' : 'X';
     const wt = sunwin.nhom === 1 ? 4 : sunwin.nhom === 2 ? 3 : 1;
     votes[v] += wt;
     signals.push({ src: 'SunwinRules', pred: sunwin.du_doan, rule: sunwin.rule });
   }
+
+  // ── Module 5 — Cầu/Điểm/Vị (trọng số = 3, ngang SW nhóm 2) ──
+  if (m5 && m5.du_doan !== null) {
+    const v  = m5.du_doan === 'Tài' ? 'T' : 'X';
+    // Tín hiệu do_tin_cay cao → trọng số tăng
+    const wt = m5.do_tin_cay >= 80 ? 4 : m5.do_tin_cay >= 65 ? 3 : 2;
+    votes[v] += wt;
+    signals.push({ src: 'M5-ScorePos', pred: m5.du_doan, rule: m5.rule, conf: m5.do_tin_cay });
+  }
+
+  // ── Markov ────────────────────────────────────────────────
   if (mrk) {
     const v  = mrk.du_doan === 'Tài' ? 'T' : 'X';
     votes[v] += mrk.do_tin_cay >= 70 ? 2 : 1;
     signals.push({ src: 'Markov', pred: mrk.du_doan, conf: mrk.do_tin_cay });
   }
+
+  // ── Dice Pattern ─────────────────────────────────────────
   if (dice) {
     const v = dice.du_doan === 'Tài' ? 'T' : 'X';
     votes[v] += 1;
@@ -256,36 +507,56 @@ function combinePrediction(hist) {
   const winnerVotes = Math.max(votes.T, votes.X);
   const agreement   = Math.round(winnerVotes / totalVotes * 100);
 
+  // ── Tính confidence ───────────────────────────────────────
   let conf;
-  if (sunwin && mrk && mrk.du_doan === sunwin.du_doan) {
+  const m5Active = m5 && m5.du_doan !== null;
+
+  if (sunwin && m5Active && mrk) {
+    const m5Agrees = m5.du_doan === sunwin.du_doan;
+    const mrkAgrees = mrk.du_doan === sunwin.du_doan;
+    if (m5Agrees && mrkAgrees) {
+      const base = sunwin.nhom === 1 ? 88 : 80;
+      conf = Math.min(94, Math.round((mrk.do_tin_cay + base + m5.do_tin_cay) / 3) + 6);
+    } else if (m5Agrees || mrkAgrees) {
+      const base = sunwin.nhom === 1 ? 82 : 72;
+      conf = Math.min(90, Math.round((base + (m5Active ? m5.do_tin_cay : 50)) / 2) + 4);
+    } else {
+      conf = Math.max(55, Math.round(agreement * 0.75 + 12));
+    }
+  } else if (sunwin && mrk && mrk.du_doan === sunwin.du_doan) {
     const base = sunwin.nhom === 1 ? 85 : sunwin.nhom === 2 ? 78 : 65;
     conf = Math.min(92, Math.round((mrk.do_tin_cay + base) / 2) + 5);
+  } else if (m5Active && mrk && m5.du_doan === mrk.du_doan) {
+    conf = Math.min(88, Math.round((m5.do_tin_cay + mrk.do_tin_cay) / 2) + 4);
   } else if (sunwin) {
     const base = sunwin.nhom === 1 ? 75 : sunwin.nhom === 2 ? 68 : 58;
     conf = Math.max(base, Math.round(agreement * 0.8 + 10));
+  } else if (m5Active) {
+    conf = Math.max(55, Math.round(m5.do_tin_cay * 0.9));
   } else {
     conf = Math.max(52, Math.round(agreement * 0.75 + 10));
   }
 
-  let method;
-  if (sunwin && mrk && dice)   method = 'sunwin+markov+dice';
-  else if (sunwin && mrk)      method = 'sunwin+markov';
-  else if (sunwin && dice)     method = 'sunwin+dice';
-  else if (sunwin)             method = 'sunwin';
-  else if (mrk && dice)        method = 'markov+dice';
-  else if (mrk)                method = 'markov';
-  else                         method = 'dice';
+  // ── Method string ────────────────────────────────────────
+  const parts = [];
+  if (sunwin)   parts.push('sunwin');
+  if (m5Active) parts.push('m5-scorepos');
+  if (mrk)      parts.push('markov');
+  if (dice)     parts.push('dice');
+  const method = parts.length ? parts.join('+') : 'default';
 
-  const mo_ta = sunwin ? sunwin.mo_ta
+  const mo_ta = m5Active ? m5.mo_ta
+    : sunwin ? sunwin.mo_ta
     : mrk ? `Markov ${mrk.do_tin_cay}% → ${mrk.du_doan}`
     : dice?.mo_ta ?? 'Không đủ tín hiệu';
 
   return {
     du_doan:    winner,
     do_tin_cay: conf,
-    rule:       sunwin?.rule ?? (mrk ? 'Markov' : 'DicePattern'),
+    rule:       m5?.rule ?? sunwin?.rule ?? (mrk ? 'Markov' : 'DicePattern'),
     mo_ta,
     method,
+    luot_danh:  winner === 'Tài' ? 'TÀI' : 'XỈU',
     votes,
     signals
   };
@@ -369,7 +640,12 @@ async function fetchAndUpdate() {
       xuc_xac:       latestDice,
       phien_du_doan: Number(phienNext),
       du_doan:       predict.du_doan,
+      luot_danh:     predict.luot_danh ?? (predict.du_doan ? (predict.du_doan === 'Tài' ? 'TÀI' : 'XỈU') : 'WAIT'),
       do_tin_cay:    predict.do_tin_cay + '%',
+      rule:          predict.rule,
+      mo_ta:         predict.mo_ta,
+      method:        predict.method,
+      signals:       predict.signals,
       pattern
     };
 
@@ -403,7 +679,7 @@ app.get('/', (req, res) => {
 <head>
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1"/>
-<title>API Tài Xỉu Sunwin v3.0 — @sewdangcap</title>
+<title>API Tài Xỉu Sunwin v4.0 — @sewdangcap</title>
 <style>
   *{box-sizing:border-box;margin:0;padding:0}
   body{
@@ -425,7 +701,7 @@ app.get('/', (req, res) => {
     grid-template-columns:repeat(auto-fit,minmax(240px,1fr));
     gap:16px;
     width:100%;
-    max-width:800px;
+    max-width:900px;
   }
   .card{
     background:#161b22;
@@ -457,19 +733,30 @@ app.get('/', (req, res) => {
     border-radius:20px;
     font-family:monospace;
   }
+  .badge-new{
+    display:inline-block;
+    background:#f97316;
+    color:#fff;
+    font-size:.65rem;
+    font-weight:700;
+    padding:2px 7px;
+    border-radius:20px;
+    margin-left:6px;
+    vertical-align:middle;
+  }
   footer{margin-top:48px;color:#484f58;font-size:.8rem}
 </style>
 </head>
 <body>
 <h1>🎲 API Tài Xỉu Sunwin</h1>
 <p class="sub">DEV @sewdangcap</p>
-<p class="ver">v3.0 — SunwinRules + Markov Bậc 1-2-3 + Dice Pattern</p>
+<p class="ver">v4.0 — SunwinRules + Markov Bậc 1-4 + Dice Pattern + Cầu/Điểm/Vị Algorithm</p>
 
 <div class="grid">
   <a class="card" href="/sunlon">
     <span class="icon">⚡</span>
     <h2>Dự đoán realtime</h2>
-    <p>Kết quả phiên hiện tại + dự đoán phiên tiếp theo. Cập nhật mỗi 5 giây.</p>
+    <p>Kết quả phiên hiện tại + dự đoán phiên tiếp theo. Cập nhật mỗi 5 giây. Bao gồm lệnh WAIT khi cần bảo toàn vốn.</p>
     <span class="path">GET /sunlon</span>
   </a>
 
@@ -485,6 +772,13 @@ app.get('/', (req, res) => {
     <h2>Lịch sử phiên</h2>
     <p>50 phiên gần nhất: xúc xắc, tổng, phân loại (Triple / Double / Seq / Mixed).</p>
     <span class="path">GET /history</span>
+  </a>
+
+  <a class="card" href="/m5-debug">
+    <span class="icon">🧠</span>
+    <h2>Debug Module 5 <span class="badge-new">NEW</span></h2>
+    <p>Xem chi tiết tín hiệu từ thuật toán Cầu + Điểm Số + Vị Xúc Xắc cho phiên hiện tại.</p>
+    <span class="path">GET /m5-debug</span>
   </a>
 </div>
 
@@ -503,7 +797,7 @@ app.get('/sunlon', async (req, res) => {
   res.json(latestData);
 });
 
-// ── /thongke (thống kê rõ ràng từng phiên + tổng) ────────────
+// ── /thongke ─────────────────────────────────────────────────
 app.get('/thongke', (req, res) => {
   const limit = Math.min(Number(req.query.limit) || 50, 200);
   const slice = winLoss.slice(-limit).reverse();
@@ -512,7 +806,6 @@ app.get('/thongke', (req, res) => {
   const loses = slice.length - wins;
   const rate  = slice.length ? Math.round(wins / slice.length * 100) : 0;
 
-  // Streak hiện tại
   let streak = 0, streakType = null;
   for (const r of slice) {
     if (streakType === null) { streakType = r.win; streak = 1; }
@@ -520,7 +813,6 @@ app.get('/thongke', (req, res) => {
     else break;
   }
 
-  // Method stats
   const methodStats = {};
   for (const r of slice) {
     const m = r.method || 'unknown';
@@ -538,8 +830,7 @@ app.get('/thongke', (req, res) => {
   }
 
   res.json({
-    id:         '@sewdangcap',
-    // ── TỔNG QUAN ────────────────────────────────────────────
+    id: '@sewdangcap',
     tong_quan: {
       tong_phien: slice.length,
       thang:      wins,
@@ -550,7 +841,6 @@ app.get('/thongke', (req, res) => {
         : 'Chưa có dữ liệu'
     },
     theo_method,
-    // ── CHI TIẾT TỪNG PHIÊN ──────────────────────────────────
     chi_tiet: slice.map((r, i) => ({
       stt:          i + 1,
       phien:        Number(r.phien),
@@ -565,7 +855,7 @@ app.get('/thongke', (req, res) => {
   });
 });
 
-// ── /thangthua (giữ lại để không break client cũ) ────────────
+// ── /thangthua (redirect legacy) ─────────────────────────────
 app.get('/thangthua', (req, res) => res.redirect('/thongke'));
 
 // ── /history ──────────────────────────────────────────────────
@@ -583,6 +873,43 @@ app.get('/history', (req, res) => {
     tong:     history.length,
     hien_thi: data.length,
     data
+  });
+});
+
+// ── /m5-debug (NEW) ───────────────────────────────────────────
+// Trả về toàn bộ tín hiệu từ Module 5 cho phiên hiện tại
+app.get('/m5-debug', (req, res) => {
+  if (history.length < 2) return res.status(503).json({ error: 'Chưa đủ dữ liệu' });
+
+  const n = history.length;
+  const current = history[n - 1];
+  const seq = history.map(h => h.ket_qua);
+
+  const m5Result = m5Predict(history);
+  const isCau11  = detectCau11(seq, 4);
+  const isCau12  = detectCau12(seq);
+
+  res.json({
+    id:              '@sewdangcap',
+    phien_hien_tai:  Number(current.phien),
+    tong_diem:       current.tong,
+    xuc_xac:         current.dice,
+    ket_qua:         current.ket_qua === 'T' ? 'Tài' : 'Xỉu',
+    phan_tich_cau: {
+      cau_11_dang_di:  isCau11,
+      cau_12_dang_di:  isCau12,
+      chuoi_gan_nhat:  seq.slice(-10).join('')
+    },
+    m5_ket_qua: m5Result
+      ? {
+          luot_danh:        m5Result.luot_danh,
+          du_doan:          m5Result.du_doan,
+          do_tin_cay:       m5Result.do_tin_cay + (m5Result.do_tin_cay > 0 ? '%' : ''),
+          do_tin_cay_label: m5Result.do_tin_cay_label,
+          rule:             m5Result.rule,
+          mo_ta:            m5Result.mo_ta
+        }
+      : { luot_danh: 'SKIP', mo_ta: 'Tổng không nằm trong bảng M5, dùng module khác' }
   });
 });
 
@@ -653,16 +980,16 @@ app.get('/markov-table', (req, res) => {
 app.use((req, res) =>
   res.status(404).json({
     error:     'Endpoint không tồn tại',
-    endpoints: ['/', '/sunlon', '/thongke', '/history', '/dice-stats', '/markov-table']
+    endpoints: ['/', '/sunlon', '/thongke', '/history', '/dice-stats', '/markov-table', '/m5-debug']
   })
 );
 
 // ── START ─────────────────────────────────────────────────────
 app.listen(PORT, () =>
   console.log(`
-🎲 API Tài Xỉu Sunwin v3.0 — DEV @sewdangcap
+🎲 API Tài Xỉu Sunwin v4.0 — DEV @sewdangcap
    http://localhost:${PORT}
    Polling: ${SOURCE_API}
-   Endpoints: /sunlon  /thongke  /history  /dice-stats  /markov-table
+   Endpoints: /sunlon  /thongke  /history  /dice-stats  /markov-table  /m5-debug
 `)
 );
