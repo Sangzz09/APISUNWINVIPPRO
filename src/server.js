@@ -426,25 +426,14 @@ async function fetchAndUpdate() {
     const latestKq = kqLabel(latestTong);
 
     latestResult = {
-      id:            '@sewdangcap',
-      phien:         latest.session,
-      ket_qua:       fullLabel(latestKq),
-      tong:          latestTong,
-      xuc_xac:       Array.isArray(latest.dice) ? latest.dice.map(Number) : null,
-      phan_loai:     Array.isArray(latest.dice) ? classifyDice(latest.dice.map(Number)) : null,
-      phien_du_doan: Number(phienN),
-      du_doan: pred ? {
-        ket_qua:     fullLabel(pred.winner),
-        luot_danh:   pred.winner === 'T' ? 'TÀI' : 'XỈU',
-        do_tin_cay:  `${pred.conf}%`,
-        muc_do:      pred.clarity,
-        ty_le:       pred.votePct,
-        cau_noi_bat: pred.patternName,
-        so_algo:     `${pred.sources.length}/5 tín hiệu`,
-        cam_bay:     pred.streak?.streakDetail ?? null,
-      } : null,
-      win_rate: winRate,
-      pattern:  pattern30,
+      phien:          String(latest.session),
+      xuc_xac:        Array.isArray(latest.dice) ? latest.dice.map(Number) : null,
+      ket_qua:        fullLabel(latestKq),
+      phien_hien_tai: phienN,
+      du_doan:        pred ? fullLabel(pred.winner) : null,
+      do_tin_cay:     pred ? `${pred.conf}%` : null,
+      pattern:        pattern30,
+      dev:            '@sewdangcap',
     };
     return latestResult;
   } catch (e) {
@@ -859,6 +848,15 @@ setTimeout(()=>location.reload(), ${CFG.POLL_MS});
 //  /sunlon — JSON dự đoán
 // ════════════════════════════════════════════════════════════════
 app.get('/sunlon', async (req, res) => {
+  if (!latestResult) {
+    const d = await fetchAndUpdate();
+    if (!d) return res.status(503).json({ error: 'Đang khởi động, thử lại sau...' });
+  }
+  res.json(latestResult);
+});
+
+// ── /api/sunlon — alias ───────────────────────────────────────
+app.get('/api/sunlon', async (req, res) => {
   if (!latestResult) {
     const d = await fetchAndUpdate();
     if (!d) return res.status(503).json({ error: 'Đang khởi động, thử lại sau...' });
