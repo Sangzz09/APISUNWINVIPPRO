@@ -1158,8 +1158,8 @@ new Chart(document.getElementById('cvA'), {
             const labels = ['BB Upper','BB Mid','BB Lower','SMA7','EMA14','Tổng'];
             const v = ctx.parsed.y;
             if (v === null) return null;
-            if (ctx.datasetIndex === 5) return `${labels[ctx.datasetIndex]}: ${v} — ${v>=TAI_LINE?'TÀI':'XỈU'}`;
-            return `${labels[ctx.datasetIndex]}: ${v}`;
+            if (ctx.datasetIndex === 5) return \`\${labels[ctx.datasetIndex]}: \${v} — \${v>=TAI_LINE?'TÀI':'XỈU'}\`;
+            return \`\${labels[ctx.datasetIndex]}: \${v}\`;
           }
         }
       },
