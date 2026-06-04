@@ -2,7 +2,7 @@
 
 /**
  * ════════════════════════════════════════════════════════════════
- *  TÀI XỈU — VIRTUAL CHART ENGINE  v5.0
+ *  TÀI XỈU — VIRTUAL CHART ENGINE  v5.1
  *  DEV @sewdangcap
  *
  *  Charts nâng cấp:
@@ -497,15 +497,18 @@ app.use(cors());
 app.use(express.json());
 
 // ════════════════════════════════════════════════════════════════
-//  / — DASHBOARD HTML
+//  / — DASHBOARD HTML (REDESIGNED v5.1)
 // ════════════════════════════════════════════════════════════════
 app.get('/', (req, res) => {
   const hist   = history.slice(-CFG.CANVAS_W);
   const pred   = predictByVirtualChart(history);
   const latest = history[history.length - 1];
 
-  if (!latest) return res.send(`<!DOCTYPE html><html><body style="background:#080c14;color:#e0e8ff;font-family:monospace;padding:2rem;text-align:center">
-    <h2 style="color:#4fc8ff">⏳ Đang khởi động...</h2><p>Kết nối API nguồn...</p>
+  if (!latest) return res.send(`<!DOCTYPE html><html><body style="background:#04070f;color:#e0e8ff;font-family:'Courier New',monospace;display:flex;height:100vh;align-items:center;justify-content:center;flex-direction:column;gap:12px">
+    <div style="font-size:32px;letter-spacing:8px;color:#00ffe7;font-weight:900">TX ENGINE</div>
+    <div style="font-size:11px;color:#334;letter-spacing:3px">ĐANG KẾT NỐI NGUỒN DỮ LIỆU...</div>
+    <div style="width:200px;height:2px;background:#0d1a2a;margin-top:8px;border-radius:1px;overflow:hidden"><div style="width:40%;height:2px;background:#00ffe7;animation:slide 1.2s ease-in-out infinite" id="bar"></div></div>
+    <style>@keyframes slide{0%{margin-left:0}50%{margin-left:60%}100%{margin-left:0}}</style>
     <script>setTimeout(()=>location.reload(),3000)</script></body></html>`);
 
   const nxtPhien   = String(Number(latest.phien) + 1);
@@ -516,7 +519,6 @@ app.get('/', (req, res) => {
   const pattern50  = history.slice(-50).map(h => h.kq).join('');
   const streak     = pred?.streak ?? analyzeStreak(hist);
 
-  // ─── Compute indicators server-side ───
   const tongArr   = hist.map(h => h.tong);
   const bb        = calcBollingerBands(tongArr, 14, 2);
   const sma7      = calcSMA(tongArr, 7);
@@ -552,895 +554,935 @@ app.get('/', (req, res) => {
 <head>
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1"/>
-<title>Tài Xỉu — Chart Engine v5.0</title>
+<title>TX Engine v5.1 · @sewdangcap</title>
 <link rel="preconnect" href="https://fonts.googleapis.com"/>
-<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;600;700&family=Rajdhani:wght@400;600;700&display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=Bebas+Neue&family=DM+Sans:wght@300;400;500;600&display=swap" rel="stylesheet"/>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-annotation@3.0.1/dist/chartjs-plugin-annotation.min.js"></script>
 <style>
-:root {
-  --bg:        #080c14;
-  --bg2:       #0d1220;
-  --bg3:       #111826;
-  --border:    rgba(64,140,255,0.12);
-  --border2:   rgba(64,140,255,0.22);
-  --tai:       #00e5a0;
-  --xiu:       #ff4f6e;
-  --tai-dim:   rgba(0,229,160,0.12);
-  --xiu-dim:   rgba(255,79,110,0.12);
-  --accent:    #4fc8ff;
-  --accent2:   #a78bfa;
-  --gold:      #f0b429;
-  --text:      #c8d8f0;
-  --muted:     #4a5a7a;
-  --label:     #2a3a5a;
-  --font-mono: 'JetBrains Mono', monospace;
-  --font-head: 'Rajdhani', sans-serif;
+:root{
+  --void:    #04070f;
+  --base:    #070c18;
+  --surface: #0b1220;
+  --raise:   #0f1a2e;
+  --border:  rgba(0,255,231,0.07);
+  --border2: rgba(0,255,231,0.14);
+  --tai:     #00ffe7;
+  --tai2:    #00c8b8;
+  --xiu:     #ff3d6b;
+  --xiu2:    #cc2255;
+  --gold:    #ffcc44;
+  --purple:  #a855f7;
+  --blue:    #3b9eff;
+  --muted:   #2a3d5a;
+  --dim:     #1a2840;
+  --text:    #8ba4c0;
+  --bright:  #c8dff0;
+  --mono:    'Space Mono', monospace;
+  --head:    'Bebas Neue', sans-serif;
+  --body:    'DM Sans', sans-serif;
 }
 *{box-sizing:border-box;margin:0;padding:0}
-html,body{background:var(--bg);color:var(--text);font-family:var(--font-mono);min-height:100vh;font-size:13px}
-
-/* scanline overlay */
-body::before{content:'';position:fixed;inset:0;background:repeating-linear-gradient(0deg,transparent,transparent 2px,rgba(0,0,0,0.03) 2px,rgba(0,0,0,0.03) 4px);pointer-events:none;z-index:0}
-
-.wrap{max-width:520px;margin:0 auto;padding:0 0 24px;position:relative;z-index:1}
-
-/* ── HEADER ── */
-.hdr{
-  background:linear-gradient(180deg,#0f1828 0%,#080c14 100%);
-  border-bottom:1px solid var(--border2);
-  padding:10px 16px;
-  display:flex;align-items:center;justify-content:space-between;
+html,body{
+  background:var(--void);
+  color:var(--bright);
+  font-family:var(--body);
+  min-height:100vh;
+  font-size:13px;
+  line-height:1.5;
 }
-.hdr-title{font-family:var(--font-head);font-size:16px;font-weight:700;letter-spacing:2px;color:#fff}
-.hdr-title span{color:var(--accent)}
-.hdr-sub{font-size:9px;color:var(--muted);letter-spacing:1px}
-.live-row{display:flex;align-items:center;gap:6px}
-.live-dot{width:7px;height:7px;border-radius:50%;background:var(--tai);box-shadow:0 0 8px var(--tai);animation:pulse 1.4s infinite}
-@keyframes pulse{0%,100%{opacity:1;transform:scale(1)}50%{opacity:.4;transform:scale(0.8)}}
-.live-txt{font-size:9px;color:var(--tai);letter-spacing:.5px}
 
-/* ── SESSION BAR ── */
-.sess-bar{display:flex;align-items:center;justify-content:space-between;padding:7px 14px;border-bottom:1px solid var(--border);background:var(--bg2)}
-.sess-l{font-size:10px;color:var(--muted)}
-.sess-v{font-family:var(--font-head);font-size:13px;font-weight:700;color:var(--accent)}
-.sess-kq{font-family:var(--font-head);font-size:11px;font-weight:700;padding:2px 10px;border-radius:3px}
-.sess-kq.tai{background:var(--tai-dim);color:var(--tai);border:1px solid rgba(0,229,160,0.25)}
-.sess-kq.xiu{background:var(--xiu-dim);color:var(--xiu);border:1px solid rgba(255,79,110,0.25)}
-.dice-inline{display:flex;gap:3px;align-items:center}
-.dv{width:18px;height:18px;border-radius:3px;display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:700;font-family:var(--font-head)}
+/* grid noise texture overlay */
+body::after{
+  content:'';position:fixed;inset:0;
+  background-image:
+    linear-gradient(rgba(0,255,231,0.015) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(0,255,231,0.015) 1px, transparent 1px);
+  background-size:40px 40px;
+  pointer-events:none;z-index:0;
+}
 
-/* ── METRICS ── */
-.metrics{display:grid;grid-template-columns:repeat(4,1fr);gap:1px;background:var(--border);border-top:1px solid var(--border);border-bottom:1px solid var(--border)}
-.mc{background:var(--bg2);padding:8px 6px;text-align:center}
-.mc-l{font-size:8px;color:var(--muted);text-transform:uppercase;letter-spacing:.6px;margin-bottom:4px}
-.mc-v{font-family:var(--font-head);font-size:17px;font-weight:700;line-height:1}
-.mc-s{font-size:8px;color:var(--muted);margin-top:2px}
+.wrap{
+  max-width:500px;margin:0 auto;
+  padding:0 0 32px;
+  position:relative;z-index:1;
+}
 
-/* ── CHART CONTAINER ── */
-.chart-wrap{padding:10px 10px 4px}
-.chart-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:6px}
-.chart-title{font-family:var(--font-head);font-size:11px;font-weight:700;letter-spacing:1px;color:var(--accent);text-transform:uppercase}
-.chart-badge{font-size:8px;padding:2px 7px;border-radius:2px;letter-spacing:.5px}
-.chart-badge.tai{background:var(--tai-dim);color:var(--tai);border:1px solid rgba(0,229,160,0.2)}
-.chart-badge.xiu{background:var(--xiu-dim);color:var(--xiu);border:1px solid rgba(255,79,110,0.2)}
-.chart-badge.neu{background:rgba(79,200,255,0.08);color:var(--accent);border:1px solid rgba(79,200,255,0.15)}
-.chart-legend{display:flex;gap:10px;align-items:center}
-.leg-item{display:flex;align-items:center;gap:4px;font-size:8px;color:var(--muted)}
-.leg-dot{width:8px;height:2px;border-radius:1px}
-.leg-dashed{width:8px;height:0;border-top:2px dashed;border-radius:1px}
+/* ── TOP NAV ── */
+.nav{
+  display:flex;align-items:center;justify-content:space-between;
+  padding:10px 14px;
+  border-bottom:1px solid var(--border2);
+  background:linear-gradient(180deg,#070e1c,var(--void));
+  position:sticky;top:0;z-index:100;
+  backdrop-filter:blur(12px);
+}
+.nav-logo{
+  font-family:var(--head);
+  font-size:22px;letter-spacing:4px;
+  background:linear-gradient(90deg,var(--tai),#7fffd4);
+  -webkit-background-clip:text;-webkit-text-fill-color:transparent;
+}
+.nav-right{display:flex;align-items:center;gap:10px}
+.pulse-ring{
+  width:8px;height:8px;border-radius:50%;
+  background:var(--tai);
+  box-shadow:0 0 0 0 rgba(0,255,231,0.6);
+  animation:ping 1.6s cubic-bezier(0,0,0.2,1) infinite;
+}
+@keyframes ping{
+  0%{box-shadow:0 0 0 0 rgba(0,255,231,0.6)}
+  70%{box-shadow:0 0 0 8px rgba(0,255,231,0)}
+  100%{box-shadow:0 0 0 0 rgba(0,255,231,0)}
+}
+.nav-session{
+  font-family:var(--mono);font-size:9px;
+  color:var(--text);letter-spacing:1px;
+}
 
-.cbox{
-  background:var(--bg3);
+/* ── HERO RESULT BANNER ── */
+.hero{
+  margin:10px;
+  border-radius:8px;
+  border:1px solid var(--border2);
+  background:var(--surface);
+  overflow:hidden;
+  position:relative;
+}
+.hero::before{
+  content:'';position:absolute;
+  top:-60px;left:-60px;
+  width:200px;height:200px;
+  border-radius:50%;
+  opacity:0.06;
+}
+.hero.tai::before{background:var(--tai)}
+.hero.xiu::before{background:var(--xiu)}
+.hero-inner{padding:12px 14px;display:flex;align-items:center;gap:12px;position:relative}
+.hero-kq{
+  font-family:var(--head);
+  font-size:52px;letter-spacing:2px;
+  line-height:1;flex-shrink:0;
+}
+.hero.tai .hero-kq{
+  color:var(--tai);
+  text-shadow:0 0 40px rgba(0,255,231,0.4),0 0 80px rgba(0,255,231,0.15);
+}
+.hero.xiu .hero-kq{
+  color:var(--xiu);
+  text-shadow:0 0 40px rgba(255,61,107,0.4),0 0 80px rgba(255,61,107,0.15);
+}
+.hero-info{flex:1}
+.hero-label{
+  font-size:9px;color:var(--text);
+  text-transform:uppercase;letter-spacing:2px;
+  margin-bottom:3px;
+}
+.hero-phien{
+  font-family:var(--mono);font-size:11px;
+  color:var(--muted);margin-bottom:6px;
+}
+.dice-row{display:flex;gap:4px}
+.die{
+  width:22px;height:22px;border-radius:4px;
+  display:flex;align-items:center;justify-content:center;
+  font-family:var(--mono);font-size:11px;font-weight:700;
+  border:1px solid rgba(255,255,255,0.08);
+}
+.hero-tong{
+  font-family:var(--mono);font-size:11px;
+  color:var(--text);margin-left:6px;
+  align-self:center;
+}
+
+/* ── STAT ROW ── */
+.stats{
+  display:grid;grid-template-columns:repeat(4,1fr);
+  gap:1px;background:var(--border);
+  border-top:1px solid var(--border);
+  border-bottom:1px solid var(--border);
+}
+.stat{
+  background:var(--base);
+  padding:9px 8px;text-align:center;
+}
+.stat-lbl{
+  font-size:8px;color:var(--muted);
+  text-transform:uppercase;letter-spacing:.8px;
+  margin-bottom:4px;
+  font-family:var(--mono);
+}
+.stat-val{
+  font-family:var(--head);font-size:20px;
+  line-height:1;
+}
+.stat-sub{font-size:8px;color:var(--muted);margin-top:2px;font-family:var(--mono)}
+
+/* ── CHART SECTION ── */
+.section{padding:10px 10px 4px}
+.section-head{
+  display:flex;align-items:center;justify-content:space-between;
+  margin-bottom:6px;
+}
+.section-title{
+  font-family:var(--head);
+  font-size:13px;letter-spacing:2px;
+  color:var(--tai);text-transform:uppercase;
+}
+.section-meta{
+  font-family:var(--mono);font-size:8px;
+  color:var(--muted);letter-spacing:.5px;
+}
+.legend{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+.leg{display:flex;align-items:center;gap:4px;font-family:var(--mono);font-size:8px;color:var(--muted)}
+.leg-line{width:10px;height:2px;border-radius:1px}
+.leg-dash{width:10px;height:0;border-top:2px dashed;border-radius:1px}
+
+.card{
+  background:var(--surface);
   border:1px solid var(--border);
   border-radius:6px;
-  padding:8px 6px 6px;
-  position:relative;
-  overflow:hidden;
+  padding:10px 8px 8px;
+  position:relative;overflow:hidden;
 }
-.cbox::before{
-  content:'';position:absolute;inset:0;
-  background:linear-gradient(180deg,rgba(15,25,50,0.4) 0%,transparent 30%);
-  pointer-events:none;
+.card::after{
+  content:'';position:absolute;
+  top:0;left:0;right:0;height:1px;
+  background:linear-gradient(90deg,transparent,var(--border2),transparent);
 }
 
-/* chart sub-label */
-.chart-sub{font-size:8px;color:var(--label);text-align:right;margin-top:3px;padding-right:4px}
+/* ── SR TAGS ── */
+.sr-row{display:flex;gap:5px;flex-wrap:wrap;padding:5px 2px 0}
+.sr-tag{
+  font-family:var(--mono);font-size:8px;
+  padding:2px 7px;border-radius:3px;
+  letter-spacing:.4px;
+}
+.sr-r{background:rgba(255,61,107,0.08);color:var(--xiu);border:1px solid rgba(255,61,107,0.18)}
+.sr-s{background:rgba(0,255,231,0.06);color:var(--tai);border:1px solid rgba(0,255,231,0.15)}
 
-/* ── SR LEGEND ── */
-.sr-legend{display:flex;gap:6px;flex-wrap:wrap;padding:4px 4px;margin-top:2px}
-.sr-tag{font-size:8px;padding:1px 6px;border-radius:2px;font-family:var(--font-head)}
-.sr-res{background:rgba(255,79,110,0.1);color:var(--xiu);border:1px solid rgba(255,79,110,0.2)}
-.sr-sup{background:rgba(0,229,160,0.1);color:var(--tai);border:1px solid rgba(0,229,160,0.2)}
+/* ── RSI ── */
+.rsi-head{
+  display:flex;align-items:center;justify-content:space-between;
+  padding:6px 10px 4px;
+}
+.rsi-lbl{font-family:var(--mono);font-size:8px;color:var(--muted);text-transform:uppercase;letter-spacing:1px}
+.rsi-val{font-family:var(--mono);font-size:10px;font-weight:700}
 
-/* ── RSI PANEL ── */
-.rsi-wrap{margin-top:4px}
-.rsi-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:3px}
-.rsi-lbl{font-size:8px;color:var(--muted);text-transform:uppercase;letter-spacing:.5px}
-.rsi-val{font-size:9px;font-weight:600}
-
-/* ── PREDICTION ── */
-.pred-box{
+/* ── PREDICTION CARD ── */
+.pred{
   margin:6px 10px;
-  background:var(--bg2);
+  border-radius:8px;
   border:1px solid var(--border2);
-  border-radius:6px;
-  padding:12px 14px;
-  position:relative;
-  overflow:hidden;
+  background:var(--surface);
+  overflow:hidden;position:relative;
 }
-.pred-box::after{
-  content:'';position:absolute;top:0;left:0;right:0;height:2px;
+.pred-glow{
+  position:absolute;
+  top:-80px;right:-80px;
+  width:200px;height:200px;
+  border-radius:50%;opacity:0.07;
 }
-.pred-box.tai::after{background:linear-gradient(90deg,transparent,var(--tai),transparent)}
-.pred-box.xiu::after{background:linear-gradient(90deg,transparent,var(--xiu),transparent)}
-.pred-hdr{font-size:9px;color:var(--muted);text-transform:uppercase;letter-spacing:.8px;margin-bottom:10px;display:flex;align-items:center;gap:6px}
-.pred-hdr::after{content:'';flex:1;height:1px;background:var(--border)}
-.pred-main-row{display:flex;align-items:center;justify-content:space-between}
-.pred-label{font-family:var(--font-head);font-size:46px;font-weight:700;line-height:1;letter-spacing:1px}
-.pred-label.tai{color:var(--tai);text-shadow:0 0 30px rgba(0,229,160,0.3)}
-.pred-label.xiu{color:var(--xiu);text-shadow:0 0 30px rgba(255,79,110,0.3)}
-.pred-details{flex:1;padding-left:14px}
-.pred-pct-row{display:flex;gap:8px;margin-bottom:4px}
-.pred-pct-bar{flex:1}
-.pct-lbl{font-size:8px;color:var(--muted);margin-bottom:2px;display:flex;justify-content:space-between}
-.pct-track{height:4px;background:var(--bg3);border-radius:2px;overflow:hidden}
-.pct-fill-t{height:4px;background:var(--tai);border-radius:2px;transition:width .3s}
-.pct-fill-x{height:4px;background:var(--xiu);border-radius:2px;transition:width .3s}
-.pred-pattern{font-size:9px;color:var(--accent2);margin-top:5px;line-height:1.4}
-.pred-streak{font-size:9px;margin-top:4px;padding:3px 8px;border-radius:3px;display:inline-block}
-.pred-streak.warn{background:rgba(240,180,41,0.1);color:var(--gold);border:1px solid rgba(240,180,41,0.2)}
-.pred-streak.safe{background:var(--tai-dim);color:var(--tai);border:1px solid rgba(0,229,160,0.2)}
+.pred.tai .pred-glow{background:var(--tai)}
+.pred.xiu .pred-glow{background:var(--xiu)}
+.pred-top{
+  padding:10px 14px 0;
+  display:flex;align-items:center;gap:6px;
+}
+.pred-label-sm{
+  font-family:var(--mono);font-size:8px;
+  text-transform:uppercase;letter-spacing:1.5px;
+  color:var(--muted);
+}
+.pred-phien{font-family:var(--mono);font-size:8px;color:var(--text)}
+.pred-body{padding:6px 14px 12px;display:flex;align-items:center;gap:12px;position:relative}
+.pred-big{
+  font-family:var(--head);
+  font-size:64px;letter-spacing:2px;
+  line-height:1;flex-shrink:0;
+}
+.pred.tai .pred-big{
+  color:var(--tai);
+  text-shadow:0 0 60px rgba(0,255,231,0.35);
+}
+.pred.xiu .pred-big{
+  color:var(--xiu);
+  text-shadow:0 0 60px rgba(255,61,107,0.35);
+}
+.pred-right{flex:1}
+.pred-bars{display:flex;flex-direction:column;gap:5px;margin-bottom:6px}
+.bar-row{display:flex;align-items:center;gap:7px}
+.bar-name{font-family:var(--mono);font-size:8px;width:24px;flex-shrink:0}
+.bar-name.t{color:var(--tai)}.bar-name.x{color:var(--xiu)}
+.bar-track{flex:1;height:6px;background:var(--raise);border-radius:3px;overflow:hidden}
+.bar-fill{height:6px;border-radius:3px;transition:width .4s}
+.bar-fill.t{background:linear-gradient(90deg,var(--tai2),var(--tai))}
+.bar-fill.x{background:linear-gradient(90deg,var(--xiu2),var(--xiu))}
+.bar-pct{font-family:var(--mono);font-size:8px;width:34px;text-align:right}
+.bar-pct.t{color:var(--tai)}.bar-pct.x{color:var(--xiu)}
+.pred-pattern{
+  font-family:var(--mono);font-size:8px;
+  color:var(--purple);line-height:1.5;
+  padding:4px 0 0;
+}
+.pred-streak{
+  display:inline-flex;align-items:center;gap:4px;
+  margin-top:4px;padding:3px 8px;border-radius:3px;
+  font-family:var(--mono);font-size:8px;
+}
+.pred-streak.hot{background:rgba(255,204,68,0.08);color:var(--gold);border:1px solid rgba(255,204,68,0.18)}
+.pred-streak.cool{background:rgba(0,255,231,0.06);color:var(--tai);border:1px solid rgba(0,255,231,0.15)}
 
-/* ── CONF RING ── */
+/* confidence arc */
 .conf-wrap{flex-shrink:0;text-align:center}
-.conf-ring{position:relative;width:80px;height:80px;display:inline-block}
-.conf-ring canvas{position:absolute;top:0;left:0}
-.conf-center{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center}
-.conf-pct{font-family:var(--font-head);font-size:20px;font-weight:700;line-height:1}
-.conf-lbl{font-size:8px;color:var(--muted);margin-top:2px;text-transform:uppercase;letter-spacing:.5px}
+.conf-svg{display:block}
+.conf-val{
+  font-family:var(--head);font-size:22px;
+  line-height:1;
+}
+.conf-sub{font-family:var(--mono);font-size:8px;color:var(--muted);margin-top:2px;letter-spacing:.5px}
 
 /* ── SIGNALS ── */
-.sigs{display:grid;grid-template-columns:1fr 1fr;gap:5px;margin:5px 10px}
-.sig{background:var(--bg2);border:1px solid var(--border);border-radius:5px;padding:7px 9px;position:relative;overflow:hidden}
-.sig::before{content:'';position:absolute;left:0;top:0;bottom:0;width:2px}
-.sig.tai::before{background:var(--tai)}
-.sig.xiu::before{background:var(--xiu)}
-.sig.neu::before{background:var(--muted)}
-.sig-name{font-size:8px;color:var(--muted);text-transform:uppercase;letter-spacing:.5px;margin-bottom:3px}
-.sig-bias{font-family:var(--font-head);font-size:13px;font-weight:700;line-height:1}
-.sig-bias.tai{color:var(--tai)}.sig-bias.xiu{color:var(--xiu)}.sig-bias.neu{color:var(--muted)}
-.sig-detail{font-size:9px;color:var(--muted);margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.sig-w{font-size:8px;color:var(--label);margin-top:2px}
+.sigs{
+  display:grid;grid-template-columns:1fr 1fr;
+  gap:5px;margin:4px 10px;
+}
+.sig{
+  background:var(--surface);
+  border:1px solid var(--border);
+  border-radius:5px;
+  padding:7px 9px 7px 11px;
+  position:relative;overflow:hidden;
+}
+.sig::before{
+  content:'';position:absolute;
+  left:0;top:0;bottom:0;width:2px;
+  border-radius:1px 0 0 1px;
+}
+.sig.t::before{background:var(--tai)}
+.sig.x::before{background:var(--xiu)}
+.sig.n::before{background:var(--muted)}
+.sig-name{font-size:8px;color:var(--muted);text-transform:uppercase;letter-spacing:.5px;margin-bottom:2px;font-family:var(--mono)}
+.sig-val{font-family:var(--head);font-size:14px;line-height:1}
+.sig-val.t{color:var(--tai)}.sig-val.x{color:var(--xiu)}.sig-val.n{color:var(--muted)}
+.sig-detail{font-size:8px;color:var(--muted);margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-family:var(--mono)}
+.sig-w{font-size:7px;color:var(--dim);margin-top:2px;font-family:var(--mono)}
 
 /* ── WEIGHT BARS ── */
-.wbars{margin:5px 10px;background:var(--bg2);border:1px solid var(--border);border-radius:5px;padding:8px 10px}
-.wbar-row{display:flex;align-items:center;gap:8px;margin-bottom:5px}
-.wbar-row:last-child{margin-bottom:0}
-.wbar-name{font-size:8px;color:var(--muted);width:72px;flex-shrink:0;text-transform:uppercase;letter-spacing:.3px}
-.wbar-track{flex:1;height:5px;background:var(--bg3);border-radius:3px;overflow:hidden}
-.wbar-fill{height:5px;border-radius:3px}
-.wbar-v{font-size:9px;width:40px;text-align:right;flex-shrink:0;font-family:var(--font-head);font-weight:600}
+.weights{
+  margin:4px 10px;
+  background:var(--surface);
+  border:1px solid var(--border);
+  border-radius:6px;
+  padding:9px 11px;
+}
+.w-title{
+  font-family:var(--mono);font-size:8px;
+  color:var(--muted);text-transform:uppercase;
+  letter-spacing:.8px;margin-bottom:7px;
+}
+.w-row{display:flex;align-items:center;gap:8px;margin-bottom:4px}
+.w-row:last-child{margin-bottom:0}
+.w-name{font-family:var(--mono);font-size:8px;color:var(--text);width:76px;flex-shrink:0}
+.w-track{flex:1;height:4px;background:var(--raise);border-radius:2px;overflow:hidden}
+.w-fill{height:4px;border-radius:2px;transition:width .4s}
+.w-pct{font-family:var(--mono);font-size:8px;width:28px;text-align:right}
 
 /* ── HISTORY ── */
-.hist-box{margin:6px 10px;background:var(--bg2);border:1px solid var(--border);border-radius:6px;overflow:hidden}
-.hist-hdr{font-size:8px;color:var(--muted);text-transform:uppercase;letter-spacing:.7px;padding:7px 10px;border-bottom:1px solid var(--border);background:var(--bg3)}
-.hist-table{width:100%;border-collapse:collapse}
-.hist-table td{padding:4px 8px;font-size:10px;border-bottom:1px solid rgba(255,255,255,0.03)}
-.hist-table tr:last-child td{border-bottom:none}
-.hist-table tr:hover td{background:rgba(79,200,255,0.03)}
-.kq-chip{display:inline-block;padding:1px 7px;border-radius:2px;font-family:var(--font-head);font-size:10px;font-weight:700}
-.kq-chip.tai{background:var(--tai-dim);color:var(--tai);border:1px solid rgba(0,229,160,0.2)}
-.kq-chip.xiu{background:var(--xiu-dim);color:var(--xiu);border:1px solid rgba(255,79,110,0.2)}
-.pnum{color:var(--muted);font-size:9px}
-.dset{display:flex;gap:2px}
-.dk{width:16px;height:16px;border-radius:2px;display:flex;align-items:center;justify-content:center;font-size:9px;font-weight:700;font-family:var(--font-head)}
-
-/* ── PATTERN 50 ── */
-.pat-section{padding:6px 10px}
-.pat-lbl{font-size:8px;color:var(--muted);text-transform:uppercase;letter-spacing:.5px;margin-bottom:5px}
-.pat-grid{display:flex;flex-wrap:wrap;gap:2px}
-.pb{width:16px;height:16px;border-radius:2px;display:flex;align-items:center;justify-content:center;font-size:8px;font-weight:700;font-family:var(--font-head)}
-.pb-t{background:var(--tai-dim);color:var(--tai);border:1px solid rgba(0,229,160,0.15)}
-.pb-x{background:var(--xiu-dim);color:var(--xiu);border:1px solid rgba(255,79,110,0.15)}
-.pat-stats{display:flex;gap:16px;padding:5px 0 0;font-size:10px}
-
-/* ── BTNS ── */
-.btns{display:flex;gap:6px;padding:10px 10px 0}
-.gbtn{
-  flex:1;padding:10px 8px;border-radius:4px;border:none;
-  font-family:var(--font-head);font-size:12px;font-weight:700;letter-spacing:1px;
-  cursor:pointer;display:flex;align-items:center;justify-content:center;gap:6px;
-  transition:opacity .12s,transform .12s;
-  text-transform:uppercase;
+.hist{
+  margin:6px 10px;
+  background:var(--surface);
+  border:1px solid var(--border);
+  border-radius:6px;overflow:hidden;
 }
-.gbtn:active{opacity:.7;transform:scale(0.97)}
-.gbtn-t{background:linear-gradient(180deg,#00c888,#008855);color:#fff;border:1px solid rgba(0,229,160,0.4)}
-.gbtn-g{background:linear-gradient(180deg,#c88800,#886600);color:#fff;border:1px solid rgba(240,180,41,0.4)}
-.gbtn-x{background:linear-gradient(180deg,#cc3050,#881030);color:#fff;border:1px solid rgba(255,79,110,0.4)}
+.hist-hdr{
+  font-family:var(--mono);font-size:8px;
+  color:var(--muted);text-transform:uppercase;
+  letter-spacing:.8px;
+  padding:7px 11px;
+  background:var(--raise);
+  border-bottom:1px solid var(--border);
+}
+.hist-table{width:100%;border-collapse:collapse}
+.hist-table tr{border-bottom:1px solid rgba(255,255,255,0.025)}
+.hist-table tr:last-child{border-bottom:none}
+.hist-table tr:hover td{background:rgba(0,255,231,0.02)}
+.hist-table td{padding:4px 8px;font-size:10px}
+.htd-n{font-family:var(--mono);font-size:8px;color:var(--muted)}
+.chip{
+  display:inline-block;padding:1px 8px;border-radius:3px;
+  font-family:var(--mono);font-size:9px;font-weight:700;
+}
+.chip.t{background:rgba(0,255,231,0.07);color:var(--tai);border:1px solid rgba(0,255,231,0.15)}
+.chip.x{background:rgba(255,61,107,0.07);color:var(--xiu);border:1px solid rgba(255,61,107,0.15)}
+.dset{display:flex;gap:2px}
+.dv{
+  width:17px;height:17px;border-radius:3px;
+  display:flex;align-items:center;justify-content:center;
+  font-family:var(--mono);font-size:9px;font-weight:700;
+  border:1px solid rgba(255,255,255,0.05);
+}
+.htd-sum{
+  font-family:var(--mono);font-size:10px;
+  font-weight:700;text-align:right;
+}
+
+/* ── PATTERN GRID ── */
+.pattern-sec{padding:6px 10px}
+.pat-lbl{font-family:var(--mono);font-size:8px;color:var(--muted);text-transform:uppercase;letter-spacing:.8px;margin-bottom:5px}
+.pat-grid{display:flex;flex-wrap:wrap;gap:2px}
+.pb{
+  width:15px;height:15px;border-radius:2px;
+  display:flex;align-items:center;justify-content:center;
+  font-family:var(--mono);font-size:7px;font-weight:700;
+}
+.pb-t{background:rgba(0,255,231,0.08);color:var(--tai);border:1px solid rgba(0,255,231,0.12)}
+.pb-x{background:rgba(255,61,107,0.08);color:var(--xiu);border:1px solid rgba(255,61,107,0.12)}
+.pat-stats{display:flex;gap:14px;padding:5px 0 0;font-family:var(--mono);font-size:9px}
+
+/* ── ACTION BUTTONS ── */
+.actions{display:flex;gap:6px;padding:10px 10px 0}
+.btn{
+  flex:1;padding:11px;border-radius:5px;border:none;
+  cursor:pointer;
+  font-family:var(--head);font-size:13px;
+  letter-spacing:2px;text-transform:uppercase;
+  transition:all .15s;
+  position:relative;overflow:hidden;
+}
+.btn::after{
+  content:'';position:absolute;inset:0;
+  background:rgba(255,255,255,0);
+  transition:background .15s;
+}
+.btn:active::after{background:rgba(255,255,255,0.08)}
+.btn-t{
+  background:linear-gradient(135deg,#004d3d,#006654);
+  color:var(--tai);border:1px solid rgba(0,255,231,0.25);
+  box-shadow:0 0 20px rgba(0,255,231,0.08);
+}
+.btn-t:hover{box-shadow:0 0 30px rgba(0,255,231,0.15);border-color:rgba(0,255,231,0.4)}
+.btn-m{
+  background:linear-gradient(135deg,#1a1400,#2a2200);
+  color:var(--gold);border:1px solid rgba(255,204,68,0.2);
+}
+.btn-m:hover{border-color:rgba(255,204,68,0.35)}
+.btn-x{
+  background:linear-gradient(135deg,#4d0015,#660020);
+  color:var(--xiu);border:1px solid rgba(255,61,107,0.25);
+  box-shadow:0 0 20px rgba(255,61,107,0.08);
+}
+.btn-x:hover{box-shadow:0 0 30px rgba(255,61,107,0.15);border-color:rgba(255,61,107,0.4)}
 
 /* ── FOOTER ── */
-.footer{text-align:center;font-size:8px;color:var(--label);padding:10px 0 0;display:flex;justify-content:center;gap:14px}
+.footer{
+  display:flex;justify-content:center;align-items:center;
+  gap:16px;padding:12px 0 0;
+  font-family:var(--mono);font-size:8px;color:var(--dim);
+  letter-spacing:.5px;
+}
 .footer a{color:var(--muted);text-decoration:none;transition:color .2s}
-.footer a:hover{color:var(--accent)}
+.footer a:hover{color:var(--tai)}
+.footer-sep{color:var(--dim)}
+
+/* chart sub note */
+.chart-note{
+  font-family:var(--mono);font-size:7px;
+  color:var(--muted);text-align:right;
+  padding:3px 2px 0;letter-spacing:.3px;
+}
 </style>
 </head>
 <body>
 <div class="wrap">
 
-<!-- HEADER -->
-<div class="hdr">
-  <div>
-    <div class="hdr-title"><span>TX</span> CHART ENGINE</div>
-    <div class="hdr-sub">VIRTUAL ANALYSIS · V5.0 · @SEWDANGCAP</div>
-  </div>
-  <div class="live-row">
-    <div class="live-dot"></div>
-    <div class="live-txt">LIVE</div>
+<!-- NAV -->
+<div class="nav">
+  <div class="nav-logo">TX ENGINE</div>
+  <div class="nav-right">
+    <div class="nav-session">v5.1 · @sewdangcap</div>
+    <div class="pulse-ring"></div>
   </div>
 </div>
 
-<!-- SESSION BAR -->
-<div class="sess-bar">
-  <div>
-    <div class="sess-l">PHIÊN GẦN NHẤT</div>
-    <div class="sess-v">#${latest.phien}</div>
-  </div>
-  <div class="dice-inline">
-    ${latest.dice ? ['#c0281e','#b08900','#6b28b0'].map((c,i)=>`<div class="dv" style="background:${c}">${latest.dice[i]}</div>`).join('') : `<span style="color:var(--muted)">${latest.tong}</span>`}
-  </div>
-  <div class="sess-kq ${latest.kq==='T'?'tai':'xiu'}">${latest.kq==='T'?'TÀI':'XỈU'} ${latest.tong}</div>
-</div>
-
-<!-- METRICS -->
-<div class="metrics">
-  <div class="mc">
-    <div class="mc-l">Kết quả</div>
-    <div class="mc-v" style="color:${latest.kq==='T'?'var(--tai)':'var(--xiu)'}">${latest.kq==='T'?'TÀI':'XỈU'}</div>
-    <div class="mc-s">${latest.tong}/18</div>
-  </div>
-  <div class="mc">
-    <div class="mc-l">Dự đoán</div>
-    <div class="mc-v" style="color:${pred?(pred.winner==='T'?'var(--tai)':'var(--xiu)'):'var(--muted)'}">${pred?fullLabel(pred.winner):'...'}</div>
-    <div class="mc-s">#${nxtPhien.slice(-5)}</div>
-  </div>
-  <div class="mc">
-    <div class="mc-l">Tài / Xỉu</div>
-    <div class="mc-v"><span style="color:var(--tai)">${taiCount50}</span><span style="color:var(--muted);font-size:11px">/</span><span style="color:var(--xiu)">${xiuCount50}</span></div>
-    <div class="mc-s">50 phiên</div>
-  </div>
-  <div class="mc">
-    <div class="mc-l">Win Rate</div>
-    <div class="mc-v" style="color:var(--gold)">${wr}</div>
-    <div class="mc-s">${recentWL.length}p theo dõi</div>
-  </div>
-</div>
-
-<!-- ═══════════════════════════════════════════ -->
-<!-- CHART A: Tổng + BB + SMA + EMA            -->
-<!-- ═══════════════════════════════════════════ -->
-<div class="chart-wrap">
-  <div class="chart-header">
-    <div class="chart-title">Chart A — Tổng</div>
-    <div class="chart-legend">
-      <div class="leg-item"><div class="leg-dot" style="background:var(--accent);height:2px"></div>EMA14</div>
-      <div class="leg-item"><div class="leg-dot" style="background:var(--gold);height:2px"></div>SMA7</div>
-      <div class="leg-item"><div class="leg-dashed" style="border-color:rgba(167,139,250,0.5)"></div>BB</div>
-    </div>
-  </div>
-  <div class="cbox">
-    <div style="position:relative;height:200px"><canvas id="cvA"></canvas></div>
-  </div>
-  <!-- SR zones -->
-  <div class="sr-legend" id="srLegend"></div>
-  <div class="chart-sub">Bollinger Bands 14×2σ · SMA7 · EMA14 · Đường vàng: Tài/Xỉu ranh giới</div>
-</div>
-
-<!-- ═══════════════════════════════════════════ -->
-<!-- CHART A2: RSI                              -->
-<!-- ═══════════════════════════════════════════ -->
-<div class="chart-wrap" style="padding-top:0">
-  <div class="rsi-wrap">
-    <div class="rsi-header">
-      <div class="rsi-lbl">RSI(10) Oscillator</div>
-      <div class="rsi-val" id="rsiCurrent" style="color:var(--accent)"></div>
-    </div>
-    <div class="cbox">
-      <div style="position:relative;height:70px"><canvas id="cvRSI"></canvas></div>
-    </div>
-  </div>
-</div>
-
-<!-- ═══════════════════════════════════════════ -->
-<!-- CHART B: 3 Xúc Xắc                        -->
-<!-- ═══════════════════════════════════════════ -->
-<div class="chart-wrap" style="padding-top:2px">
-  <div class="chart-header">
-    <div class="chart-title">Chart B — 3 Xúc Xắc</div>
-    <div class="chart-legend">
-      <div class="leg-item"><div class="leg-dot" style="background:#e85060"></div>D1</div>
-      <div class="leg-item"><div class="leg-dot" style="background:#d4a020"></div>D2</div>
-      <div class="leg-item"><div class="leg-dot" style="background:#9050d0"></div>D3</div>
-    </div>
-  </div>
-  <div class="cbox">
-    <div style="position:relative;height:170px"><canvas id="cvB"></canvas></div>
-  </div>
-  <!-- Heatmap -->
-  <div style="margin-top:4px;display:flex;gap:1px" id="diceHeat"></div>
-  <div class="chart-sub">Màu nền: Xanh = Tài · Đỏ = Xỉu</div>
-</div>
-
-<!-- PREDICTION BOX -->
-${pred ? `
-<div class="pred-box ${pred.winner==='T'?'tai':'xiu'}">
-  <div class="pred-hdr">DỰ ĐOÁN PHIÊN #${nxtPhien.slice(-5)}</div>
-  <div class="pred-main-row">
-    <div class="pred-label ${pred.winner==='T'?'tai':'xiu'}">${fullLabel(pred.winner)}</div>
-    <div class="pred-details">
-      <div class="pred-pct-row">
-        <div class="pred-pct-bar">
-          <div class="pct-lbl"><span style="color:var(--tai)">TÀI</span><span>${pred.votePct.T}</span></div>
-          <div class="pct-track"><div class="pct-fill-t" style="width:${pred.votePct.T}"></div></div>
+<!-- HERO RESULT -->
+<div class="hero ${latest.kq==='T'?'tai':'xiu'}">
+  <div class="hero-inner">
+    <div class="hero-kq">${latest.kq==='T'?'TÀI':'XỈU'}</div>
+    <div class="hero-info">
+      <div class="hero-label">Phiên gần nhất</div>
+      <div class="hero-phien">PHIÊN #${latest.phien}</div>
+      <div style="display:flex;align-items:center;gap:6px">
+        <div class="dice-row">
+          ${latest.dice ? ['#1a3d2b','#3d2e00','#2a1a4d'].map((c,i)=>`<div class="die" style="background:${c}">${latest.dice[i]}</div>`).join('') : ''}
         </div>
-        <div class="pred-pct-bar">
-          <div class="pct-lbl"><span style="color:var(--xiu)">XỈU</span><span>${pred.votePct.X}</span></div>
-          <div class="pct-track"><div class="pct-fill-x" style="width:${pred.votePct.X}"></div></div>
+        <div class="hero-tong">Tổng: <strong style="color:${latest.kq==='T'?'var(--tai)':'var(--xiu)'}">${latest.tong}</strong></div>
+      </div>
+    </div>
+  </div>
+  <div style="height:2px;background:linear-gradient(90deg,transparent,${latest.kq==='T'?'var(--tai)':'var(--xiu)'},transparent);opacity:0.3"></div>
+</div>
+
+<!-- STATS -->
+<div class="stats">
+  <div class="stat">
+    <div class="stat-lbl">KẾT QUẢ</div>
+    <div class="stat-val" style="color:${latest.kq==='T'?'var(--tai)':'var(--xiu)'}">${latest.kq==='T'?'TÀI':'XỈU'}</div>
+    <div class="stat-sub">${latest.tong}/18</div>
+  </div>
+  <div class="stat">
+    <div class="stat-lbl">DỰ ĐOÁN</div>
+    <div class="stat-val" style="color:${pred?(pred.winner==='T'?'var(--tai)':'var(--xiu)'):'var(--muted)'}">${pred?fullLabel(pred.winner):'···'}</div>
+    <div class="stat-sub">#${nxtPhien.slice(-5)}</div>
+  </div>
+  <div class="stat">
+    <div class="stat-lbl">T / X</div>
+    <div class="stat-val"><span style="color:var(--tai)">${taiCount50}</span><span style="color:var(--muted);font-size:13px"> / </span><span style="color:var(--xiu)">${xiuCount50}</span></div>
+    <div class="stat-sub">50 phiên</div>
+  </div>
+  <div class="stat">
+    <div class="stat-lbl">WIN RATE</div>
+    <div class="stat-val" style="color:var(--gold)">${wr}</div>
+    <div class="stat-sub">${recentWL.length}p</div>
+  </div>
+</div>
+
+<!-- CHART A -->
+<div class="section">
+  <div class="section-head">
+    <div class="section-title">Chart A — Tổng</div>
+    <div class="legend">
+      <div class="leg"><div class="leg-line" style="background:var(--blue)"></div>EMA14</div>
+      <div class="leg"><div class="leg-line" style="background:var(--gold)"></div>SMA7</div>
+      <div class="leg"><div class="leg-dash" style="border-color:var(--purple);opacity:.5"></div>BB</div>
+    </div>
+  </div>
+  <div class="card">
+    <div style="height:195px;position:relative"><canvas id="cvA"></canvas></div>
+  </div>
+  <div class="sr-row" id="srLegend"></div>
+  <div class="chart-note">BB 14×2σ · SMA7 · EMA14 · Vàng: ranh giới Tài/Xỉu</div>
+</div>
+
+<!-- RSI -->
+<div class="section" style="padding-top:0">
+  <div class="rsi-head">
+    <div class="rsi-lbl">RSI(10) Oscillator</div>
+    <div class="rsi-val" id="rsiVal"></div>
+  </div>
+  <div class="card">
+    <div style="height:65px;position:relative"><canvas id="cvRSI"></canvas></div>
+  </div>
+</div>
+
+<!-- CHART B -->
+<div class="section" style="padding-top:2px">
+  <div class="section-head">
+    <div class="section-title">Chart B — 3 Xúc Xắc</div>
+    <div class="legend">
+      <div class="leg"><div class="leg-line" style="background:#ff5060"></div>D1</div>
+      <div class="leg"><div class="leg-line" style="background:#e8c000"></div>D2</div>
+      <div class="leg"><div class="leg-line" style="background:#9060e0"></div>D3</div>
+    </div>
+  </div>
+  <div class="card">
+    <div style="height:160px;position:relative"><canvas id="cvB"></canvas></div>
+  </div>
+  <div style="display:flex;gap:1px;margin-top:4px;border-radius:3px;overflow:hidden" id="heatmap"></div>
+  <div class="chart-note">Xanh = Tài · Đỏ = Xỉu</div>
+</div>
+
+<!-- PREDICTION -->
+${pred ? `
+<div class="pred ${pred.winner==='T'?'tai':'xiu'}">
+  <div class="pred-glow"></div>
+  <div class="pred-top">
+    <div class="pred-label-sm">Dự đoán phiên</div>
+    <div class="pred-phien">#${nxtPhien.slice(-5)}</div>
+  </div>
+  <div class="pred-body">
+    <div class="pred-big">${fullLabel(pred.winner)}</div>
+    <div class="pred-right">
+      <div class="pred-bars">
+        <div class="bar-row">
+          <div class="bar-name t">TÀI</div>
+          <div class="bar-track"><div class="bar-fill t" style="width:${pred.votePct.T}"></div></div>
+          <div class="bar-pct t">${pred.votePct.T}</div>
+        </div>
+        <div class="bar-row">
+          <div class="bar-name x">XỈU</div>
+          <div class="bar-track"><div class="bar-fill x" style="width:${pred.votePct.X}"></div></div>
+          <div class="bar-pct x">${pred.votePct.X}</div>
         </div>
       </div>
       <div class="pred-pattern">📐 ${pred.patternName ?? '—'}</div>
-      ${streak?.streakDetail ? `<div class="pred-streak ${streak.streakLen>=3?'warn':'safe'}">⚡ ${streak.streakDetail}</div>` : ''}
+      ${streak?.streakDetail ? `<div class="pred-streak ${streak.streakLen>=3?'hot':'cool'}">⚡ ${streak.streakDetail}</div>` : ''}
     </div>
     <div class="conf-wrap">
-      <div class="conf-ring">
-        <canvas id="cvConf" width="80" height="80"></canvas>
-        <div class="conf-center">
-          <span class="conf-pct" style="color:${pred.winner==='T'?'var(--tai)':'var(--xiu)'}">${pred.conf}%</span>
-          <span class="conf-lbl">${pred.clarity}</span>
-        </div>
-      </div>
+      <svg class="conf-svg" width="76" height="76" viewBox="0 0 76 76">
+        <circle cx="38" cy="38" r="30" fill="none" stroke="rgba(255,255,255,0.05)" stroke-width="5"/>
+        <circle cx="38" cy="38" r="30" fill="none"
+          stroke="${pred.winner==='T'?'#00ffe7':'#ff3d6b'}"
+          stroke-width="5" stroke-linecap="round"
+          stroke-dasharray="${(pred.conf/100)*188.5} 188.5"
+          transform="rotate(-90 38 38)"
+          style="filter:drop-shadow(0 0 6px ${pred.winner==='T'?'rgba(0,255,231,0.6)':'rgba(255,61,107,0.6)'})"
+        />
+        <text x="38" y="35" text-anchor="middle" fill="${pred.winner==='T'?'#00ffe7':'#ff3d6b'}"
+          font-family="'Bebas Neue',sans-serif" font-size="16" letter-spacing="1">${pred.conf}%</text>
+        <text x="38" y="47" text-anchor="middle" fill="#2a3d5a"
+          font-family="'Space Mono',monospace" font-size="6">${pred.clarity}</text>
+      </svg>
     </div>
   </div>
-</div>` : `<div class="pred-box" style="text-align:center;padding:1.5rem;color:var(--muted)">⏳ Đang phân tích...</div>`}
+</div>` : `<div style="text-align:center;padding:20px;color:var(--muted);font-family:var(--mono);font-size:10px">⏳ Đang phân tích...</div>`}
 
-<!-- SIGNALS GRID -->
+<!-- SIGNALS -->
 <div class="sigs">
   ${(pred?.sources ?? []).map(s=>`
-  <div class="sig ${s.bias==='T'?'tai':s.bias==='X'?'xiu':'neu'}">
+  <div class="sig ${s.bias==='T'?'t':s.bias==='X'?'x':'n'}">
     <div class="sig-name">${s.name}</div>
-    <div class="sig-bias ${s.bias==='T'?'tai':s.bias==='X'?'xiu':'neu'}">${s.biasFull??'—'}</div>
+    <div class="sig-val ${s.bias==='T'?'t':s.bias==='X'?'x':'n'}">${s.biasFull??'—'}</div>
     <div class="sig-detail">${s.detail}</div>
     <div class="sig-w">W: ${s.weight}</div>
   </div>`).join('')}
 </div>
 
-<!-- WEIGHT BARS -->
-<div class="wbars">
-  <div style="font-size:8px;color:var(--muted);text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px">Trọng số Ensemble</div>
-  ${(pred?.sources ?? []).map(s=>{
-    const pct = Math.round(s.weight / (pred?.sources??[]).reduce((a,b)=>a+b.weight,0) * 100);
+<!-- WEIGHTS -->
+<div class="weights">
+  <div class="w-title">Trọng số Ensemble</div>
+  ${(pred?.sources??[]).map(s=>{
+    const tot = (pred?.sources??[]).reduce((a,b)=>a+b.weight,0);
+    const pct = Math.round(s.weight/tot*100);
     const col = s.bias==='T'?'var(--tai)':s.bias==='X'?'var(--xiu)':'var(--muted)';
-    return `<div class="wbar-row">
-      <div class="wbar-name">${s.name}</div>
-      <div class="wbar-track"><div class="wbar-fill" style="width:${pct}%;background:${col}"></div></div>
-      <div class="wbar-v" style="color:${col}">${pct}%</div>
+    return `<div class="w-row">
+      <div class="w-name">${s.name}</div>
+      <div class="w-track"><div class="w-fill" style="width:${pct}%;background:${col}"></div></div>
+      <div class="w-pct" style="color:${col}">${pct}%</div>
     </div>`;
   }).join('')}
 </div>
 
-<!-- HISTORY TABLE -->
-<div class="hist-box">
-  <div class="hist-hdr">LỊCH SỬ 15 PHIÊN GẦN NHẤT</div>
+<!-- HISTORY -->
+<div class="hist">
+  <div class="hist-hdr">Lịch sử 15 phiên gần nhất</div>
   <table class="hist-table">
-    <tr style="background:var(--bg3)">
-      <td style="color:var(--muted);font-size:8px;padding:4px 8px">PHIÊN</td>
-      <td style="color:var(--muted);font-size:8px">KẾT QUẢ</td>
-      <td style="color:var(--muted);font-size:8px">XÚC XẮC</td>
-      <td style="color:var(--muted);font-size:8px;text-align:right">TỔNG</td>
+    <tr style="background:var(--raise)">
+      <td class="htd-n" style="padding:4px 8px">PHIÊN</td>
+      <td class="htd-n">KQ</td>
+      <td class="htd-n">XÚC XẮC</td>
+      <td class="htd-n" style="text-align:right">TỔNG</td>
     </tr>
     ${history.slice(-15).reverse().map(h=>`
     <tr>
-      <td class="pnum">#${String(h.phien).slice(-5)}</td>
-      <td><span class="kq-chip ${h.kq==='T'?'tai':'xiu'}">${fullLabel(h.kq)}</span></td>
-      <td><div class="dset">${h.dice?['#c0281e','#b08900','#6b28b0'].map((c,i)=>`<div class="dk" style="background:${c}">${h.dice[i]}</div>`).join(''):'–'}</div></td>
-      <td style="font-weight:700;text-align:right;color:${h.kq==='T'?'var(--tai)':'var(--xiu)'}">${h.tong}</td>
+      <td class="htd-n">#${String(h.phien).slice(-5)}</td>
+      <td><span class="chip ${h.kq==='T'?'t':'x'}">${fullLabel(h.kq)}</span></td>
+      <td><div class="dset">${h.dice?['#1a3d2b','#3d2e00','#2a1a4d'].map((c,i)=>`<div class="dv" style="background:${c}">${h.dice[i]}</div>`).join(''):'—'}</div></td>
+      <td class="htd-sum" style="color:${h.kq==='T'?'var(--tai)':'var(--xiu)'}">${h.tong}</td>
     </tr>`).join('')}
   </table>
 </div>
 
 <!-- PATTERN 50 -->
-<div class="pat-section">
+<div class="pattern-sec">
   <div class="pat-lbl">Chuỗi 50 phiên gần nhất</div>
   <div class="pat-grid">
     ${pattern50.split('').map(c=>`<span class="pb ${c==='T'?'pb-t':'pb-x'}">${c}</span>`).join('')}
   </div>
   <div class="pat-stats">
-    <span style="color:var(--tai);font-weight:700">T: ${taiCount50}</span>
-    <span style="color:var(--muted)">|</span>
-    <span style="color:var(--xiu);font-weight:700">X: ${xiuCount50}</span>
-    <span style="color:var(--muted)">|</span>
+    <span style="color:var(--tai)">T: ${taiCount50}</span>
+    <span style="color:var(--muted)">·</span>
+    <span style="color:var(--xiu)">X: ${xiuCount50}</span>
+    <span style="color:var(--muted)">·</span>
     <span style="color:var(--muted)">${((taiCount50/Math.max(1,taiCount50+xiuCount50))*100).toFixed(0)}% Tài</span>
   </div>
 </div>
 
-<!-- BUTTONS -->
-<div class="btns">
-  <button class="gbtn gbtn-t">▲ TÀI</button>
-  <button class="gbtn gbtn-g">⚡ PHÂN TÍCH</button>
-  <button class="gbtn gbtn-x">▼ XỈU</button>
+<!-- ACTIONS -->
+<div class="actions">
+  <button class="btn btn-t">▲ TÀI</button>
+  <button class="btn btn-m">⚡ PHÂN TÍCH</button>
+  <button class="btn btn-x">▼ XỈU</button>
 </div>
 
 <!-- FOOTER -->
 <div class="footer">
-  <span>Chart Engine v5.0 · @sewdangcap</span>
+  <span>Chart Engine v5.1</span>
+  <span class="footer-sep">·</span>
   <a href="/sunlon">API</a>
   <a href="/signals">Signals</a>
   <a href="/thongke">Thống kê</a>
   <a href="/history">History</a>
 </div>
 
-</div><!-- /wrap -->
+</div>
 
 <script>
 Chart.register(window['chartjs-plugin-annotation']);
 
-const DATA_A    = ${chartAData};
-const BB_UPPER  = ${bbUpper};
-const BB_MID    = ${bbMiddle};
-const BB_LOWER  = ${bbLower};
-const SMA7_D    = ${sma7Data};
-const EMA14_D   = ${ema14Data};
-const RSI_D     = ${rsiData};
-const SR_ZONES  = ${srZones};
-const DATA_B1   = ${chartBD1};
-const DATA_B2   = ${chartBD2};
-const DATA_B3   = ${chartBD3};
-const LABELS    = ${chartLabels};
-const PRED      = ${predJson};
-const TAI_LINE  = ${CFG.TAI_LINE};
+const DATA_A   = ${chartAData};
+const BB_U     = ${bbUpper};
+const BB_M     = ${bbMiddle};
+const BB_L     = ${bbLower};
+const SMA7     = ${sma7Data};
+const EMA14    = ${ema14Data};
+const RSI      = ${rsiData};
+const SR       = ${srZones};
+const D1       = ${chartBD1};
+const D2       = ${chartBD2};
+const D3       = ${chartBD3};
+const LABELS   = ${chartLabels};
+const PRED     = ${predJson};
+const TAI_LINE = ${CFG.TAI_LINE};
 
-// ── Colors ──
-const C_TAI  = '#00e5a0';
-const C_XIU  = '#ff4f6e';
-const C_ACC  = '#4fc8ff';
-const C_GOLD = '#f0b429';
-const C_PRP  = '#a78bfa';
+const TAI  = '#00ffe7';
+const XIU  = '#ff3d6b';
+const GOLD = '#ffcc44';
+const BLUE = '#3b9eff';
+const PURP = '#a855f7';
 
-// ── Point colors for Chart A ──
-const ptColor  = DATA_A.map(v => v===null?'rgba(255,255,255,.15)':v>=TAI_LINE?C_TAI:C_XIU);
-const ptBorder = DATA_A.map(v => v>=TAI_LINE?'rgba(0,229,160,0.4)':'rgba(255,79,110,0.4)');
-const ptSize   = DATA_A.map((_,i) => i===DATA_A.length-1 ? 9 : 4);
-const ptStyle  = DATA_A.map((_,i) => i===DATA_A.length-1 ? 'rectRot' : 'circle');
+// point colors Chart A
+const ptCol  = DATA_A.map(v => v===null?'rgba(255,255,255,.1)':v>=TAI_LINE?TAI:XIU);
+const ptBord = DATA_A.map(v => v>=TAI_LINE?'rgba(0,255,231,0.35)':'rgba(255,61,107,0.35)');
+const ptSz   = DATA_A.map((_,i)=>i===DATA_A.length-1?10:3.5);
+const ptSt   = DATA_A.map((_,i)=>i===DATA_A.length-1?'rectRot':'circle');
 
-// ── Build S/R annotation ──
-function buildSRAnnotations() {
-  const ann = {};
-  SR_ZONES.forEach((z, i) => {
-    ann['sr'+i] = {
-      type: 'line',
-      yMin: z.level, yMax: z.level,
-      borderColor: z.type==='resistance' ? 'rgba(255,79,110,0.35)' : 'rgba(0,229,160,0.35)',
-      borderWidth: 1,
-      borderDash: [4, 3],
-      label: {
-        display: true,
-        content: z.level + (z.type==='resistance'?' R':' S') + '×'+z.touches,
-        position: 'end',
-        color: z.type==='resistance' ? C_XIU : C_TAI,
-        font: { size: 8, family: 'JetBrains Mono' },
-        backgroundColor: 'rgba(8,12,20,0.85)',
-        padding: { x: 4, y: 2 },
-        yAdjust: z.type==='resistance' ? -10 : 10,
-      }
-    };
+// SR annotations
+function srAnnotations(){
+  const a={};
+  SR.forEach((z,i)=>{
+    a['z'+i]={
+      type:'line',yMin:z.level,yMax:z.level,
+      borderColor:z.type==='resistance'?'rgba(255,61,107,0.3)':'rgba(0,255,231,0.3)',
+      borderWidth:1,borderDash:[4,3],
+      label:{display:true,content:z.level+(z.type==='resistance'?' R':' S')+'×'+z.touches,
+        position:'end',color:z.type==='resistance'?XIU:TAI,
+        font:{size:7,family:'Space Mono'},
+        backgroundColor:'rgba(4,7,15,0.9)',
+        padding:{x:4,y:2},
+        yAdjust:z.type==='resistance'?-10:10}};
   });
-  // Tai/Xiu line
-  ann['taiLine'] = {
-    type: 'line',
-    yMin: TAI_LINE, yMax: TAI_LINE,
-    borderColor: 'rgba(240,180,41,0.4)',
-    borderWidth: 1.5,
-    borderDash: [6,4],
-    label: {
-      display: true,
-      content: 'TÀI ≥ ' + TAI_LINE,
-      position: 'start',
-      color: C_GOLD,
-      font: { size: 8, family: 'JetBrains Mono' },
-      backgroundColor: 'rgba(8,12,20,0.85)',
-      padding: { x: 4, y: 2 },
-    }
-  };
-  return ann;
+  a.tai={type:'line',yMin:TAI_LINE,yMax:TAI_LINE,
+    borderColor:'rgba(255,204,68,0.35)',borderWidth:1.5,borderDash:[6,4],
+    label:{display:true,content:'TÀI ≥'+TAI_LINE,position:'start',color:GOLD,
+      font:{size:7,family:'Space Mono'},backgroundColor:'rgba(4,7,15,0.9)',padding:{x:4,y:2}}};
+  return a;
 }
 
-// ── Chart A ──
-new Chart(document.getElementById('cvA'), {
-  type: 'line',
-  data: {
-    labels: LABELS,
-    datasets: [
-      // BB Upper
-      {
-        data: BB_UPPER,
-        borderColor: 'rgba(167,139,250,0.4)',
-        backgroundColor: 'rgba(167,139,250,0.04)',
-        borderWidth: 1,
-        borderDash: [3, 2],
-        pointRadius: 0,
-        fill: '+2',
-        tension: 0.3,
-        order: 4,
-      },
-      // BB Middle (SMA14)
-      {
-        data: BB_MID,
-        borderColor: 'rgba(167,139,250,0.6)',
-        borderWidth: 1,
-        borderDash: [4, 3],
-        pointRadius: 0,
-        fill: false,
-        tension: 0.3,
-        order: 3,
-      },
-      // BB Lower
-      {
-        data: BB_LOWER,
-        borderColor: 'rgba(167,139,250,0.4)',
-        backgroundColor: 'rgba(167,139,250,0.04)',
-        borderWidth: 1,
-        borderDash: [3, 2],
-        pointRadius: 0,
-        fill: false,
-        tension: 0.3,
-        order: 4,
-      },
-      // SMA7
-      {
-        data: SMA7_D,
-        borderColor: 'rgba(240,180,41,0.7)',
-        borderWidth: 1.5,
-        pointRadius: 0,
-        fill: false,
-        tension: 0.3,
-        order: 2,
-      },
-      // EMA14
-      {
-        data: EMA14_D,
-        borderColor: 'rgba(79,200,255,0.8)',
-        borderWidth: 1.5,
-        pointRadius: 0,
-        fill: false,
-        tension: 0.3,
-        order: 1,
-      },
-      // Main line
-      {
-        data: DATA_A,
-        borderColor: 'rgba(220,230,255,0.75)',
-        backgroundColor: ctx => {
-          const g = ctx.chart.ctx.createLinearGradient(0, 0, 0, 200);
-          g.addColorStop(0, 'rgba(0,229,160,0.12)');
-          g.addColorStop(0.5, 'rgba(79,200,255,0.04)');
-          g.addColorStop(1, 'rgba(255,79,110,0.08)');
-          return g;
-        },
-        borderWidth: 2,
-        pointBackgroundColor: ptColor,
-        pointBorderColor: ptBorder,
-        pointBorderWidth: 2,
-        pointRadius: ptSize,
-        pointStyle: ptStyle,
-        pointHoverRadius: 10,
-        tension: 0.28,
-        fill: true,
-        order: 0,
-      },
-    ]
-  },
-  options: {
-    responsive: true, maintainAspectRatio: false,
-    interaction: { mode: 'index', intersect: false },
-    plugins: {
-      legend: { display: false },
-      tooltip: {
-        backgroundColor: 'rgba(8,12,20,0.95)',
-        titleColor: '#4fc8ff',
-        bodyColor: '#c8d8f0',
-        borderColor: 'rgba(64,140,255,0.2)',
-        borderWidth: 1,
-        titleFont: { family: 'JetBrains Mono', size: 9 },
-        bodyFont: { family: 'JetBrains Mono', size: 9 },
-        callbacks: {
-          title: items => 'Phiên ' + LABELS[items[0].dataIndex],
-          label: ctx => {
-            const labels = ['BB Upper','BB Mid','BB Lower','SMA7','EMA14','Tổng'];
-            const v = ctx.parsed.y;
-            if (v === null) return null;
-            if (ctx.datasetIndex === 5) return \`\${labels[ctx.datasetIndex]}: \${v} — \${v>=TAI_LINE?'TÀI':'XỈU'}\`;
-            return \`\${labels[ctx.datasetIndex]}: \${v}\`;
+// Chart A
+new Chart(document.getElementById('cvA'),{
+  type:'line',
+  data:{labels:LABELS,datasets:[
+    // BB Upper
+    {data:BB_U,borderColor:'rgba(168,85,247,0.35)',borderWidth:1,borderDash:[3,2],
+     pointRadius:0,fill:'+2',backgroundColor:'rgba(168,85,247,0.03)',tension:0.3,order:5},
+    // BB Mid
+    {data:BB_M,borderColor:'rgba(168,85,247,0.5)',borderWidth:1,borderDash:[4,3],
+     pointRadius:0,fill:false,tension:0.3,order:4},
+    // BB Lower
+    {data:BB_L,borderColor:'rgba(168,85,247,0.35)',borderWidth:1,borderDash:[3,2],
+     pointRadius:0,fill:false,tension:0.3,order:5},
+    // SMA7
+    {data:SMA7,borderColor:'rgba(255,204,68,0.65)',borderWidth:1.5,
+     pointRadius:0,fill:false,tension:0.3,order:2},
+    // EMA14
+    {data:EMA14,borderColor:'rgba(59,158,255,0.75)',borderWidth:1.5,
+     pointRadius:0,fill:false,tension:0.3,order:1},
+    // Main
+    {data:DATA_A,
+     borderColor:'rgba(200,223,240,0.7)',
+     backgroundColor:ctx=>{
+       const g=ctx.chart.ctx.createLinearGradient(0,0,0,195);
+       g.addColorStop(0,'rgba(0,255,231,0.1)');
+       g.addColorStop(0.5,'rgba(59,158,255,0.04)');
+       g.addColorStop(1,'rgba(255,61,107,0.07)');
+       return g;
+     },
+     borderWidth:2,
+     pointBackgroundColor:ptCol,pointBorderColor:ptBord,
+     pointBorderWidth:1.5,pointRadius:ptSz,pointStyle:ptSt,
+     pointHoverRadius:9,tension:0.28,fill:true,order:0}
+  ]},
+  options:{
+    responsive:true,maintainAspectRatio:false,
+    interaction:{mode:'index',intersect:false},
+    plugins:{
+      legend:{display:false},
+      tooltip:{
+        backgroundColor:'rgba(4,7,15,0.96)',
+        titleColor:BLUE,bodyColor:'#8ba4c0',
+        borderColor:'rgba(0,255,231,0.12)',borderWidth:1,
+        titleFont:{family:'Space Mono',size:9},
+        bodyFont:{family:'Space Mono',size:9},
+        callbacks:{
+          title:i=>'Phiên '+LABELS[i[0].dataIndex],
+          label:c=>{
+            const v=c.parsed.y;if(v===null)return null;
+            const ns=['BB↑','BB mid','BB↓','SMA7','EMA14','Tổng'];
+            if(c.datasetIndex===5)return ns[5]+': '+v+' — '+(v>=TAI_LINE?'TÀI':'XỈU');
+            return ns[c.datasetIndex]+': '+v;
           }
         }
       },
-      annotation: {
-        annotations: buildSRAnnotations()
-      }
+      annotation:{annotations:srAnnotations()}
     },
-    scales: {
-      x: {
-        ticks: { font: { size: 7, family: 'JetBrains Mono' }, color: 'rgba(74,90,122,0.8)', maxTicksLimit: 10, maxRotation: 0 },
-        grid: { color: 'rgba(30,45,80,0.6)', lineWidth: 1 },
-        border: { color: 'rgba(30,45,80,0.8)' },
-      },
-      y: {
-        min: 2, max: 19,
-        ticks: {
-          font: { size: 8, family: 'JetBrains Mono' }, color: 'rgba(74,90,122,0.9)', stepSize: 3,
-          callback: v => v === TAI_LINE ? v + '─' : v
-        },
-        grid: {
-          color: ctx => ctx.tick.value === TAI_LINE ? 'rgba(240,180,41,0.2)' : 'rgba(30,45,80,0.5)',
-          lineWidth: ctx => ctx.tick.value === TAI_LINE ? 1.5 : 1,
-        },
-        border: { color: 'rgba(30,45,80,0.8)' },
-      },
+    scales:{
+      x:{ticks:{font:{size:7,family:'Space Mono'},color:'rgba(42,61,90,0.9)',maxTicksLimit:10,maxRotation:0},
+         grid:{color:'rgba(15,26,46,0.8)'},border:{color:'rgba(15,26,46,0.9)'}},
+      y:{min:2,max:19,
+         ticks:{font:{size:8,family:'Space Mono'},color:'rgba(42,61,90,0.9)',stepSize:3,
+                callback:v=>v===TAI_LINE?v+'─':v},
+         grid:{color:c=>c.tick.value===TAI_LINE?'rgba(255,204,68,0.15)':'rgba(15,26,46,0.7)',
+               lineWidth:c=>c.tick.value===TAI_LINE?1.5:1},
+         border:{color:'rgba(15,26,46,0.9)'}}
     }
   }
 });
 
-// ── SR Legend ──
-const srEl = document.getElementById('srLegend');
-if (srEl) {
-  SR_ZONES.forEach(z => {
-    const tag = document.createElement('span');
-    tag.className = 'sr-tag ' + (z.type==='resistance'?'sr-res':'sr-sup');
-    tag.textContent = (z.type==='resistance'?'R':'S') + ' ' + z.level + ' ×' + z.touches;
-    srEl.appendChild(tag);
-  });
+// SR legend
+const srEl=document.getElementById('srLegend');
+if(srEl) SR.forEach(z=>{
+  const t=document.createElement('span');
+  t.className='sr-tag '+(z.type==='resistance'?'sr-r':'sr-s');
+  t.textContent=(z.type==='resistance'?'R ':'S ')+z.level+' ×'+z.touches;
+  srEl.appendChild(t);
+});
+
+// RSI value display
+const lastRSI=RSI.filter(v=>v!==null).slice(-1)[0];
+const rsiEl=document.getElementById('rsiVal');
+if(rsiEl&&lastRSI!==undefined){
+  const col=lastRSI>70?XIU:lastRSI<30?TAI:BLUE;
+  rsiEl.textContent='RSI '+(+lastRSI.toFixed(1))+(lastRSI>70?' OB':lastRSI<30?' OS':'');
+  rsiEl.style.color=col;
 }
 
-// ── Chart RSI ──
-const rsiCurrent = RSI_D.filter(v=>v!==null).slice(-1)[0];
-const rsiEl = document.getElementById('rsiCurrent');
-if (rsiEl && rsiCurrent !== undefined) {
-  const col = rsiCurrent > 70 ? C_XIU : rsiCurrent < 30 ? C_TAI : C_ACC;
-  rsiEl.textContent = 'RSI ' + rsiCurrent + (rsiCurrent>70?' OB':rsiCurrent<30?' OS':'');
-  rsiEl.style.color = col;
-}
-
-new Chart(document.getElementById('cvRSI'), {
-  type: 'line',
-  data: {
-    labels: LABELS,
-    datasets: [{
-      data: RSI_D,
-      borderColor: RSI_D.map(v => v===null?'transparent':v>70?C_XIU:v<30?C_TAI:C_ACC),
-      backgroundColor: ctx => {
-        const g = ctx.chart.ctx.createLinearGradient(0, 0, 0, 70);
-        g.addColorStop(0, 'rgba(79,200,255,0.15)');
-        g.addColorStop(1, 'rgba(79,200,255,0.01)');
-        return g;
-      },
-      borderWidth: 1.5,
-      pointRadius: RSI_D.map((v,i) => {
-        if (v===null) return 0;
-        if (i===RSI_D.length-1) return 5;
-        return v>70||v<30 ? 3 : 0;
-      }),
-      pointBackgroundColor: RSI_D.map(v => v>70?C_XIU:v<30?C_TAI:C_ACC),
-      fill: true,
-      tension: 0.4,
-    }]
-  },
-  options: {
-    responsive: true, maintainAspectRatio: false,
-    plugins: {
-      legend: { display: false },
-      tooltip: {
-        backgroundColor: 'rgba(8,12,20,0.95)',
-        bodyColor: '#c8d8f0',
-        borderColor: 'rgba(64,140,255,0.2)',
-        borderWidth: 1,
-        bodyFont: { family: 'JetBrains Mono', size: 9 },
-        callbacks: { label: c => 'RSI: ' + c.parsed.y }
-      },
-      annotation: {
-        annotations: {
-          ob: { type:'line', yMin:70, yMax:70, borderColor:'rgba(255,79,110,0.35)', borderWidth:1, borderDash:[3,2],
-                label:{display:true,content:'OB 70',position:'end',color:C_XIU,font:{size:7,family:'JetBrains Mono'},backgroundColor:'rgba(8,12,20,0.85)',padding:{x:3,y:1}} },
-          os: { type:'line', yMin:30, yMax:30, borderColor:'rgba(0,229,160,0.35)', borderWidth:1, borderDash:[3,2],
-                label:{display:true,content:'OS 30',position:'end',color:C_TAI,font:{size:7,family:'JetBrains Mono'},backgroundColor:'rgba(8,12,20,0.85)',padding:{x:3,y:1}} },
-          mid: { type:'line', yMin:50, yMax:50, borderColor:'rgba(79,200,255,0.15)', borderWidth:1, borderDash:[2,4] },
-        }
-      }
+// Chart RSI
+new Chart(document.getElementById('cvRSI'),{
+  type:'line',
+  data:{labels:LABELS,datasets:[{
+    data:RSI,
+    borderColor:RSI.map(v=>v===null?'transparent':v>70?XIU:v<30?TAI:BLUE),
+    backgroundColor:ctx=>{
+      const g=ctx.chart.ctx.createLinearGradient(0,0,0,65);
+      g.addColorStop(0,'rgba(59,158,255,0.12)');g.addColorStop(1,'rgba(59,158,255,0.01)');return g;},
+    borderWidth:1.5,fill:true,tension:0.4,
+    pointRadius:RSI.map((v,i)=>{
+      if(v===null)return 0;
+      if(i===RSI.length-1)return 4;
+      return v>70||v<30?3:0;
+    }),
+    pointBackgroundColor:RSI.map(v=>v>70?XIU:v<30?TAI:BLUE)
+  }]},
+  options:{
+    responsive:true,maintainAspectRatio:false,
+    plugins:{
+      legend:{display:false},
+      tooltip:{backgroundColor:'rgba(4,7,15,0.96)',bodyColor:'#8ba4c0',
+               borderColor:'rgba(0,255,231,0.1)',borderWidth:1,
+               bodyFont:{family:'Space Mono',size:9},
+               callbacks:{label:c=>'RSI: '+c.parsed.y}},
+      annotation:{annotations:{
+        ob:{type:'line',yMin:70,yMax:70,borderColor:'rgba(255,61,107,0.3)',borderWidth:1,borderDash:[3,2],
+            label:{display:true,content:'OB 70',position:'end',color:XIU,
+                   font:{size:7,family:'Space Mono'},backgroundColor:'rgba(4,7,15,0.9)',padding:{x:3,y:1}}},
+        os:{type:'line',yMin:30,yMax:30,borderColor:'rgba(0,255,231,0.3)',borderWidth:1,borderDash:[3,2],
+            label:{display:true,content:'OS 30',position:'end',color:TAI,
+                   font:{size:7,family:'Space Mono'},backgroundColor:'rgba(4,7,15,0.9)',padding:{x:3,y:1}}},
+        mid:{type:'line',yMin:50,yMax:50,borderColor:'rgba(59,158,255,0.1)',borderWidth:1,borderDash:[2,4]},
+      }}
     },
-    scales: {
-      x: { display: false },
-      y: {
-        min: 0, max: 100,
-        ticks: { font:{size:7,family:'JetBrains Mono'}, color:'rgba(74,90,122,0.8)', stepSize:25,
-                 callback: v => v===70?'OB':v===30?'OS':v===50?'50':'' },
-        grid: { color:'rgba(30,45,80,0.4)' },
-        border: { color:'rgba(30,45,80,0.8)' },
-      }
+    scales:{
+      x:{display:false},
+      y:{min:0,max:100,
+         ticks:{font:{size:7,family:'Space Mono'},color:'rgba(42,61,90,0.9)',stepSize:25,
+                callback:v=>v===70?'OB':v===30?'OS':v===50?'50':''},
+         grid:{color:'rgba(15,26,46,0.6)'},border:{color:'rgba(15,26,46,0.9)'}}
     }
   }
 });
 
-// ── Chart B (3 Dice) ──
-// Detect divergence points: where dice move in opposite directions
-const divPoints = DATA_B1.map((v, i) => {
-  if (i===0||v===null||DATA_B2[i]===null||DATA_B3[i]===null) return null;
-  if (DATA_B1[i-1]===null) return null;
-  const d1 = Math.sign(DATA_B1[i]-DATA_B1[i-1]);
-  const d2 = Math.sign(DATA_B2[i]-DATA_B2[i-1]);
-  const d3 = Math.sign(DATA_B3[i]-DATA_B3[i-1]);
-  const allSame = d1===d2 && d2===d3 && d1!==0;
-  return allSame ? DATA_A[i] : null; // convergence point
-});
-
-new Chart(document.getElementById('cvB'), {
-  type: 'line',
-  data: {
-    labels: LABELS,
-    datasets: [
-      {
-        label: 'D1', data: DATA_B1,
-        borderColor: '#d04050',
-        backgroundColor: ctx => {
-          const g = ctx.chart.ctx.createLinearGradient(0,0,0,170);
-          g.addColorStop(0,'rgba(208,64,80,0.18)');
-          g.addColorStop(1,'rgba(208,64,80,0.01)');
-          return g;
-        },
-        borderWidth: 2,
-        pointBackgroundColor: DATA_B1.map((v,i)=>{
-          if (i===DATA_B1.length-1) return '#d04050';
-          if (DATA_B2[i]!==null&&DATA_B3[i]!==null&&DATA_B1[i]===DATA_B2[i]&&DATA_B2[i]===DATA_B3[i]) return '#fff';
-          return '#d04050';
-        }),
-        pointRadius: DATA_B1.map((v,i)=>{
-          if (i===DATA_B1.length-1) return 7;
-          if (DATA_B2[i]!==null&&DATA_B3[i]!==null&&DATA_B1[i]===DATA_B2[i]&&DATA_B2[i]===DATA_B3[i]) return 7;
-          return 3;
-        }),
-        pointBorderColor: 'rgba(208,64,80,0.4)',
-        pointBorderWidth: 2,
-        tension: 0.35, fill: true,
-      },
-      {
-        label: 'D2', data: DATA_B2,
-        borderColor: '#c8a000',
-        backgroundColor: ctx => {
-          const g = ctx.chart.ctx.createLinearGradient(0,0,0,170);
-          g.addColorStop(0,'rgba(200,160,0,0.12)');
-          g.addColorStop(1,'rgba(200,160,0,0.01)');
-          return g;
-        },
-        borderWidth: 2,
-        pointBackgroundColor: '#c8a000',
-        pointBorderColor: 'rgba(200,160,0,0.4)',
-        pointBorderWidth: 2,
-        pointRadius: DATA_B2.map((_,i)=>i===DATA_B2.length-1?7:3),
-        tension: 0.35, fill: false,
-      },
-      {
-        label: 'D3', data: DATA_B3,
-        borderColor: '#8840c0',
-        backgroundColor: ctx => {
-          const g = ctx.chart.ctx.createLinearGradient(0,0,0,170);
-          g.addColorStop(0,'rgba(136,64,192,0.12)');
-          g.addColorStop(1,'rgba(136,64,192,0.01)');
-          return g;
-        },
-        borderWidth: 2,
-        pointBackgroundColor: '#8840c0',
-        pointBorderColor: 'rgba(136,64,192,0.4)',
-        pointBorderWidth: 2,
-        pointRadius: DATA_B3.map((_,i)=>i===DATA_B3.length-1?7:3),
-        tension: 0.35, fill: false,
-      },
-    ]
-  },
-  options: {
-    responsive: true, maintainAspectRatio: false,
-    interaction: { mode: 'index', intersect: false },
-    plugins: {
-      legend: { display: false },
-      tooltip: {
-        backgroundColor: 'rgba(8,12,20,0.95)',
-        titleColor: C_ACC,
-        bodyColor: '#c8d8f0',
-        borderColor: 'rgba(64,140,255,0.2)',
-        borderWidth: 1,
-        titleFont: { family: 'JetBrains Mono', size: 9 },
-        bodyFont: { family: 'JetBrains Mono', size: 9 },
-        callbacks: {
-          title: items => 'Phiên ' + LABELS[items[0].dataIndex],
-          label: ctx => ['D1','D2','D3'][ctx.datasetIndex] + ': ' + ctx.parsed.y,
-          afterBody: items => {
-            const i = items[0].dataIndex;
-            const s = (DATA_B1[i]||0)+(DATA_B2[i]||0)+(DATA_B3[i]||0);
-            return ['Tổng: ' + s + ' — ' + (s>=11?'TÀI':'XỈU')];
+// Chart B
+new Chart(document.getElementById('cvB'),{
+  type:'line',
+  data:{labels:LABELS,datasets:[
+    {label:'D1',data:D1,
+     borderColor:'#e03050',
+     backgroundColor:ctx=>{const g=ctx.chart.ctx.createLinearGradient(0,0,0,160);g.addColorStop(0,'rgba(224,48,80,0.15)');g.addColorStop(1,'rgba(224,48,80,0.01)');return g;},
+     borderWidth:2,fill:true,tension:0.35,
+     pointBackgroundColor:D1.map((v,i)=>{
+       if(i===D1.length-1)return '#e03050';
+       if(D2[i]!==null&&D3[i]!==null&&D1[i]===D2[i]&&D2[i]===D3[i])return '#fff';
+       return '#e03050';
+     }),
+     pointRadius:D1.map((v,i)=>i===D1.length-1?8:D2[i]!==null&&D3[i]!==null&&D1[i]===D2[i]&&D2[i]===D3[i]?6:3),
+     pointBorderColor:'rgba(224,48,80,0.35)',pointBorderWidth:1.5},
+    {label:'D2',data:D2,
+     borderColor:'#d4a800',
+     backgroundColor:ctx=>{const g=ctx.chart.ctx.createLinearGradient(0,0,0,160);g.addColorStop(0,'rgba(212,168,0,0.1)');g.addColorStop(1,'rgba(212,168,0,0.01)');return g;},
+     borderWidth:2,fill:false,tension:0.35,
+     pointBackgroundColor:'#d4a800',pointBorderColor:'rgba(212,168,0,0.35)',
+     pointBorderWidth:1.5,
+     pointRadius:D2.map((_,i)=>i===D2.length-1?8:3)},
+    {label:'D3',data:D3,
+     borderColor:'#7840c0',
+     backgroundColor:ctx=>{const g=ctx.chart.ctx.createLinearGradient(0,0,0,160);g.addColorStop(0,'rgba(120,64,192,0.1)');g.addColorStop(1,'rgba(120,64,192,0.01)');return g;},
+     borderWidth:2,fill:false,tension:0.35,
+     pointBackgroundColor:'#7840c0',pointBorderColor:'rgba(120,64,192,0.35)',
+     pointBorderWidth:1.5,
+     pointRadius:D3.map((_,i)=>i===D3.length-1?8:3)},
+  ]},
+  options:{
+    responsive:true,maintainAspectRatio:false,
+    interaction:{mode:'index',intersect:false},
+    plugins:{
+      legend:{display:false},
+      tooltip:{
+        backgroundColor:'rgba(4,7,15,0.96)',titleColor:BLUE,bodyColor:'#8ba4c0',
+        borderColor:'rgba(0,255,231,0.1)',borderWidth:1,
+        titleFont:{family:'Space Mono',size:9},bodyFont:{family:'Space Mono',size:9},
+        callbacks:{
+          title:i=>'Phiên '+LABELS[i[0].dataIndex],
+          label:c=>['D1','D2','D3'][c.datasetIndex]+': '+c.parsed.y,
+          afterBody:i=>{
+            const idx=i[0].dataIndex;
+            const s=(D1[idx]||0)+(D2[idx]||0)+(D3[idx]||0);
+            return['Tổng: '+s+' — '+(s>=TAI_LINE?'TÀI':'XỈU')];
           }
         }
       },
-      annotation: {
-        annotations: {
-          // Average line
-          avg: {
-            type: 'line', yMin: 3.5, yMax: 3.5,
-            borderColor: 'rgba(79,200,255,0.2)', borderWidth: 1, borderDash: [3,3],
-            label: { display:true, content:'AVG 3.5', position:'start', color: C_ACC,
-                     font:{size:7,family:'JetBrains Mono'}, backgroundColor:'rgba(8,12,20,0.85)', padding:{x:3,y:1} }
-          }
-        }
-      }
+      annotation:{annotations:{
+        avg:{type:'line',yMin:3.5,yMax:3.5,
+          borderColor:'rgba(59,158,255,0.18)',borderWidth:1,borderDash:[3,3],
+          label:{display:true,content:'AVG 3.5',position:'start',color:BLUE,
+                 font:{size:7,family:'Space Mono'},backgroundColor:'rgba(4,7,15,0.9)',padding:{x:3,y:1}}}
+      }}
     },
-    scales: {
-      x: {
-        ticks: { font:{size:7,family:'JetBrains Mono'}, color:'rgba(74,90,122,0.8)', maxTicksLimit:10, maxRotation:0 },
-        grid: { color:'rgba(30,45,80,0.5)' },
-        border: { color:'rgba(30,45,80,0.8)' },
-      },
-      y: {
-        min: 0, max: 7,
-        ticks: { font:{size:8,family:'JetBrains Mono'}, color:'rgba(74,90,122,0.9)', stepSize:1,
-                 callback: v => v===0?'':v },
-        grid: { color:'rgba(30,45,80,0.5)' },
-        border: { color:'rgba(30,45,80,0.8)' },
-      }
+    scales:{
+      x:{ticks:{font:{size:7,family:'Space Mono'},color:'rgba(42,61,90,0.9)',maxTicksLimit:10,maxRotation:0},
+         grid:{color:'rgba(15,26,46,0.7)'},border:{color:'rgba(15,26,46,0.9)'}},
+      y:{min:0,max:7,
+         ticks:{font:{size:8,family:'Space Mono'},color:'rgba(42,61,90,0.9)',stepSize:1,callback:v=>v===0?'':v},
+         grid:{color:'rgba(15,26,46,0.6)'},border:{color:'rgba(15,26,46,0.9)'}}
     }
   }
 });
 
-// ── Dice Heatmap ──
-const heatEl = document.getElementById('diceHeat');
-if (heatEl) {
-  const last30 = DATA_A.slice(-30);
-  last30.forEach((v, i) => {
-    const el = document.createElement('div');
-    el.style.cssText = 'flex:1;height:12px;border-radius:1px;';
-    if (v===null) { el.style.background='rgba(255,255,255,0.03)'; }
-    else if (v>=TAI_LINE) { el.style.background='rgba(0,229,160,'+(0.15+((v-11)/7)*0.5)+')'; }
-    else { el.style.background='rgba(255,79,110,'+(0.15+((11-v)/8)*0.5)+')'; }
-    el.title = v!==null ? (v>=TAI_LINE?'TÀI':'XỈU')+' '+v : '?';
-    heatEl.appendChild(el);
+// Heatmap
+const hm=document.getElementById('heatmap');
+if(hm){
+  DATA_A.slice(-30).forEach(v=>{
+    const el=document.createElement('div');
+    el.style.flex='1';el.style.height='10px';
+    if(v===null) el.style.background='rgba(255,255,255,0.02)';
+    else if(v>=TAI_LINE) el.style.background='rgba(0,255,231,'+(0.12+((v-11)/7)*0.45)+')';
+    else el.style.background='rgba(255,61,107,'+(0.12+((11-v)/8)*0.45)+')';
+    if(v!==null) el.title=(v>=TAI_LINE?'TÀI':'XỈU')+' '+v;
+    hm.appendChild(el);
   });
 }
 
-// ── Confidence Ring ──
-if (PRED) {
-  const cv = document.getElementById('cvConf');
-  if (cv) {
-    const ctx = cv.getContext('2d');
-    const col = PRED.winner==='T' ? C_TAI : C_XIU;
-    const pct = PRED.conf/100;
-    const cx=40, cy=40, r=30;
-    ctx.clearRect(0,0,80,80);
-    // Track
-    ctx.beginPath(); ctx.arc(cx,cy,r,0,Math.PI*2);
-    ctx.strokeStyle='rgba(255,255,255,0.06)'; ctx.lineWidth=6; ctx.stroke();
-    // Glow
-    ctx.shadowBlur=12; ctx.shadowColor=col;
-    ctx.beginPath(); ctx.arc(cx,cy,r,-Math.PI/2,-Math.PI/2+Math.PI*2*pct);
-    ctx.strokeStyle=col; ctx.lineWidth=6; ctx.lineCap='round'; ctx.stroke();
-    ctx.shadowBlur=0;
-    // Tick marks
-    for(let t=0;t<12;t++){
-      const a=-Math.PI/2+t/12*Math.PI*2;
-      const r1=28, r2=32;
-      ctx.beginPath();
-      ctx.moveTo(cx+Math.cos(a)*r1, cy+Math.sin(a)*r1);
-      ctx.lineTo(cx+Math.cos(a)*r2, cy+Math.sin(a)*r2);
-      ctx.strokeStyle='rgba(255,255,255,0.06)'; ctx.lineWidth=1; ctx.stroke();
-    }
-  }
-}
-
-// ── Auto reload ──
-setTimeout(()=>location.reload(), ${CFG.POLL_MS});
+setTimeout(()=>location.reload(),${CFG.POLL_MS});
 </script>
 </body>
 </html>`);
@@ -1596,7 +1638,7 @@ app.use((req, res) => res.status(404).json({
 // ════════════════════════════════════════════════════════════════
 app.listen(PORT, () => console.log(`
 ╔═══════════════════════════════════════════════════╗
-║  Virtual Chart Engine v5.0 — @sewdangcap         ║
+║  Virtual Chart Engine v5.1 — @sewdangcap         ║
 ║  http://localhost:${PORT}                             ║
 ╠═══════════════════════════════════════════════════╣
 ║  Charts: BB14×2σ · SMA7 · EMA14 · RSI10 · S/R   ║
