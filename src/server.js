@@ -1,765 +1,1011 @@
-"use strict";
-const https  = require("https");
-const http   = require("http");
+'use strict';
 
-const SOURCE_URL  = "https://apilichsusunwinsew.onrender.com/api/taixiu/history?limit=50";
-const PORT        = process.env.PORT || 3000;
-const HISTORY_MAX = 600;
+/**
+ * ════════════════════════════════════════════════════════════════
+ *  TÀI XỈU — VIRTUAL CHART ENGINE  v4.0
+ *  DEV @sewdangcap
+ *
+ *  Giao diện game nhà cái:
+ *    CHART A — Đường Tổng  (Y: 3–18, X: 50 phiên)
+ *    CHART B — 3 Đường Xúc Xắc (Y: 1–6, X: 50 phiên)
+ *             màu: Đỏ / Vàng / Tím
+ *
+ *  Pipeline phân tích kỹ thuật (5 tín hiệu):
+ *    1. Geometric Pattern  → W / M / H&S / Cầu Thang / Flag / Triple
+ *    2. Linear Slope + Momentum + Mean-Reversion
+ *    3. Support / Resistance Zone
+ *    4. Dice Convergence (3 xúc xắc đồng pha)
+ *    5. Streak / Cầu tâm lý
+ *    → Adaptive Ensemble vote có trọng số
+ *
+ *  Endpoints:
+ *    GET /           → Dashboard HTML (giao diện nhà cái)
+ *    GET /sunlon     → JSON dự đoán (format gốc)
+ *    GET /canvas     → JSON snapshot 2 biểu đồ
+ *    GET /signals    → JSON chi tiết 5 tín hiệu
+ *    GET /thongke    → JSON winrate tracking
+ *    GET /history    → JSON lịch sử phiên
+ * ════════════════════════════════════════════════════════════════
+ */
 
-let history = [];
+const express = require('express');
+const cors    = require('cors');
+const app     = express();
+const PORT    = process.env.PORT || 3000;
 
-function fetchSource() {
-  return new Promise((resolve, reject) => {
-    const u   = new URL(SOURCE_URL);
-    const mod = u.protocol === "https:" ? https : http;
-    const req = mod.get(SOURCE_URL, {
-      headers: { "User-Agent": "Mozilla/5.0", Accept: "application/json" }
-    }, (res) => {
-      let raw = "";
-      res.on("data", c => raw += c);
-      res.on("end", () => {
-        try   { resolve({ ok: true,  body: JSON.parse(raw) }); }
-        catch { resolve({ ok: false, raw: raw.slice(0, 1200) }); }
-      });
-    });
-    req.on("error", reject);
-    req.setTimeout(14000, () => { req.destroy(); reject(new Error("timeout")); });
+// ── ĐỔI URL NÀY NẾU CẦN ─────────────────────────────────────
+const SOURCE_API = 'https://apilichsusunwinsew.onrender.com/api/taixiu/history?limit=50';
+
+// ════════════════════════════════════════════════════════════════
+//  CONFIG
+// ════════════════════════════════════════════════════════════════
+const CFG = {
+  CANVAS_W:     50,
+  MIN_HIST:      8,
+  TAI_LINE:     11,
+  MAX_HISTORY:  500,
+  CONF_FLOOR:   52,
+  CONF_CEIL:    91,
+  POLL_MS:      6000,
+
+  W_PATTERN:   0.32,
+  W_SLOPE:     0.22,
+  W_SR:        0.18,
+  W_DICE:      0.16,
+  W_STREAK:    0.12,
+};
+
+// ════════════════════════════════════════════════════════════════
+//  STATE
+// ════════════════════════════════════════════════════════════════
+let history      = [];
+let latestResult = null;
+let pendingPred  = null;
+let winLoss      = [];
+
+// ════════════════════════════════════════════════════════════════
+//  HELPERS
+// ════════════════════════════════════════════════════════════════
+const kqLabel   = t => (t >= CFG.TAI_LINE ? 'T' : 'X');
+const fullLabel = v => (v === 'T' ? 'Tài' : v === 'X' ? 'Xỉu' : null);
+
+function calibrateConf(raw) {
+  return Math.round(Math.max(CFG.CONF_FLOOR,
+    Math.min(CFG.CONF_CEIL,
+      CFG.CONF_FLOOR + (raw - 0.5) * 2 * (CFG.CONF_CEIL - CFG.CONF_FLOOR)
+    )));
+}
+
+function classifyDice(dice) {
+  if (!dice || dice.length !== 3) return '?';
+  const [a, b, c] = [...dice].sort((x, y) => x - y);
+  if (a === b && b === c)             return `Ba ${a}`;
+  if (a === b || b === c)             return `Đôi ${a === b ? a : b}`;
+  if (c - a === 2 && b - a === 1)     return `Seri ${a}-${b}-${c}`;
+  return `${a}-${b}-${c}`;
+}
+
+// ════════════════════════════════════════════════════════════════
+//  A1 — LOCAL EXTREMA
+// ════════════════════════════════════════════════════════════════
+function findExtrema(arr, wing = 2) {
+  const v = [];
+  arr.forEach((val, i) => { if (val !== null) v.push({ i, v: val }); });
+  if (v.length < wing * 2 + 1) return [];
+  const r = [];
+  for (let k = wing; k < v.length - wing; k++) {
+    const cur = v[k].v;
+    let isPeak = true, isTrough = true;
+    for (let w = 1; w <= wing; w++) {
+      if (v[k-w].v >= cur || v[k+w].v >= cur) isPeak   = false;
+      if (v[k-w].v <= cur || v[k+w].v <= cur) isTrough = false;
+    }
+    if (isPeak)   r.push({ i: v[k].i, v: cur, type: 'peak'   });
+    if (isTrough) r.push({ i: v[k].i, v: cur, type: 'trough' });
+  }
+  return r;
+}
+
+// ════════════════════════════════════════════════════════════════
+//  A2 — PATTERN SCANNER
+// ════════════════════════════════════════════════════════════════
+function scanPattern(arr) {
+  const ex  = findExtrema(arr, 2);
+  if (ex.length < 3) return null;
+  const n   = ex.length;
+  const raw = arr.filter(v => v !== null);
+  const cur = raw[raw.length - 1];
+  const near = (a, b, t = 2) => Math.abs(a - b) <= t;
+
+  if (n >= 3) {
+    const [e1, e2, e3] = [ex[n-3], ex[n-2], ex[n-1]];
+    if (e1.type === 'trough' && e2.type === 'peak' && e3.type === 'trough' &&
+        near(e1.v, e3.v, 3) && e2.v > e1.v + 2) {
+      const str = Math.min(1, 0.55 + (e2.v - e3.v) / 14);
+      const confirmed = cur >= e2.v - 2;
+      return { name: `Mẫu W — Đáy ~${Math.round((e1.v+e3.v)/2)}${confirmed?' ✓':''}`, bias: 'T',
+               strength: confirmed ? Math.min(1, str + 0.12) : str * 0.85 };
+    }
+  }
+  if (n >= 3) {
+    const [e1, e2, e3] = [ex[n-3], ex[n-2], ex[n-1]];
+    if (e1.type === 'peak' && e2.type === 'trough' && e3.type === 'peak' &&
+        near(e1.v, e3.v, 3) && e2.v < e1.v - 2) {
+      const str = Math.min(1, 0.55 + (e3.v - e2.v) / 14);
+      const confirmed = cur <= e2.v + 2;
+      return { name: `Mẫu M — Đỉnh ~${Math.round((e1.v+e3.v)/2)}${confirmed?' ✓':''}`, bias: 'X',
+               strength: confirmed ? Math.min(1, str + 0.12) : str * 0.85 };
+    }
+  }
+  if (n >= 5) {
+    const [ls, lt, hd, rt, rs] = ex.slice(n - 5);
+    if (ls.type==='peak' && lt.type==='trough' && hd.type==='peak' &&
+        rt.type==='trough' && rs.type==='peak' &&
+        hd.v > ls.v && hd.v > rs.v && near(ls.v, rs.v, 3) && near(lt.v, rt.v, 3)) {
+      return { name: `Vai-Đầu-Vai Đỉnh ${hd.v}`, bias: 'X',
+               strength: Math.min(1, 0.62 + (hd.v - rs.v) / 14) };
+    }
+  }
+  if (n >= 5) {
+    const [ls, lt, hd, rt, rs] = ex.slice(n - 5);
+    if (ls.type==='trough' && lt.type==='peak' && hd.type==='trough' &&
+        rt.type==='peak' && rs.type==='trough' &&
+        hd.v < ls.v && hd.v < rs.v && near(ls.v, rs.v, 3) && near(lt.v, rt.v, 3)) {
+      return { name: `Vai-Đầu-Vai Đáy ${hd.v}`, bias: 'T',
+               strength: Math.min(1, 0.62 + (rs.v - hd.v) / 14) };
+    }
+  }
+  {
+    const peaks   = ex.filter(e => e.type === 'peak').slice(-3);
+    const troughs = ex.filter(e => e.type === 'trough').slice(-3);
+    if (peaks.length === 3 && troughs.length === 3) {
+      const pkUp = peaks[0].v   < peaks[1].v   && peaks[1].v   < peaks[2].v;
+      const trUp = troughs[0].v < troughs[1].v && troughs[1].v < troughs[2].v;
+      const pkDn = peaks[0].v   > peaks[1].v   && peaks[1].v   > peaks[2].v;
+      const trDn = troughs[0].v > troughs[1].v && troughs[1].v > troughs[2].v;
+      if (pkUp && trUp) return { name: `Cầu Thang Tăng — Đỉnh ${peaks[2].v}`,   bias: 'T', strength: 0.72 };
+      if (pkDn && trDn) return { name: `Cầu Thang Giảm — Đỉnh ${peaks[2].v}`,   bias: 'X', strength: 0.72 };
+    }
+  }
+  if (raw.length >= 6) {
+    const impulse = raw[raw.length-4] - raw[Math.max(0, raw.length-7)];
+    const consol  = Math.max(...raw.slice(-4)) - Math.min(...raw.slice(-4));
+    if (Math.abs(impulse) >= 5 && consol <= 3) {
+      const bias = impulse > 0 ? 'T' : 'X';
+      return { name: `Flag ${bias==='T'?'Tăng':'Giảm'} Đà${impulse>0?'+':''}${impulse.toFixed(0)}`, bias, strength: 0.65 };
+    }
+  }
+  if (n >= 4) {
+    const lt = ex.filter(e => e.type === 'trough').slice(-3);
+    if (lt.length === 3 && near(lt[0].v,lt[1].v,2) && near(lt[1].v,lt[2].v,2))
+      return { name: `Triple Đáy ~${Math.round((lt[0].v+lt[1].v+lt[2].v)/3)}`, bias: 'T', strength: 0.75 };
+    const lp = ex.filter(e => e.type === 'peak').slice(-3);
+    if (lp.length === 3 && near(lp[0].v,lp[1].v,2) && near(lp[1].v,lp[2].v,2))
+      return { name: `Triple Đỉnh ~${Math.round((lp[0].v+lp[1].v+lp[2].v)/3)}`, bias: 'X', strength: 0.75 };
+  }
+  return null;
+}
+
+// ════════════════════════════════════════════════════════════════
+//  A3 — SLOPE ANALYZER
+// ════════════════════════════════════════════════════════════════
+function analyzeSlope(arr, win = 8) {
+  const pts = arr.filter(v => v !== null).slice(-win).map((v, i) => ({ v, i }));
+  if (pts.length < 3) return null;
+  const n = pts.length;
+  let sX = 0, sY = 0, sXY = 0, sX2 = 0;
+  pts.forEach(({ v }, i) => { sX += i; sY += v; sXY += i*v; sX2 += i*i; });
+  const denom = n*sX2 - sX*sX;
+  const slope = denom ? (n*sXY - sX*sY) / denom : 0;
+  const last  = pts[n-1].v;
+  const proj  = Math.round(Math.max(3, Math.min(18, last + slope)));
+  const mr    = (proj >= 16 && slope > 0.5) || (proj <= 5 && slope < -0.5);
+  const h     = Math.floor(n / 2);
+  const mo    = pts.slice(h).reduce((s,p)=>s+p.v,0)/(n-h) - pts.slice(0,h).reduce((s,p)=>s+p.v,0)/h;
+  let slopeBias = null, detail = '';
+  if (mr)                     { slopeBias = proj>=16?'X':'T'; detail = `Hồi quy — proj ${proj}`; }
+  else if (Math.abs(slope)>=.8){ slopeBias = slope>0?'T':'X'; detail = `Slope mạnh ${slope>0?'▲':'▼'} ${slope.toFixed(2)}/p`; }
+  else if (Math.abs(slope)>=.3){ slopeBias = slope>0?'T':'X'; detail = `Slope ${slope>0?'▲':'▼'} ${slope.toFixed(2)}/p`; }
+  else if (Math.abs(mo)>=1.2)  { slopeBias = mo>0?'T':'X';    detail = `Momentum ${mo>0?'▲':'▼'} ${mo.toFixed(1)}`; }
+  else                          { detail = `Slope phẳng (${slope.toFixed(2)})`; }
+  return { slope: +slope.toFixed(3), last, proj, momentum: +mo.toFixed(2), mr, slopeBias, detail,
+           strength: mr ? 0.85 : Math.min(1, 0.45 + Math.abs(slope)/3 + Math.abs(mo)/10) };
+}
+
+// ════════════════════════════════════════════════════════════════
+//  A4 — SUPPORT / RESISTANCE
+// ════════════════════════════════════════════════════════════════
+function detectSR(arr, minT = 2) {
+  const v = arr.filter(x => x !== null);
+  if (v.length < 8) return { zones: [], srBias: null, srDetail: 'Chưa đủ dữ liệu' };
+  const ep = [];
+  for (let i = 1; i < v.length-1; i++) {
+    if (v[i] > v[i-1] && v[i] >= v[i+1]) ep.push({ v: v[i], r: 'res' });
+    if (v[i] < v[i-1] && v[i] <= v[i+1]) ep.push({ v: v[i], r: 'sup' });
+  }
+  const bins = {};
+  for (const e of ep) {
+    const k = Math.round(e.v);
+    if (!bins[k]) bins[k] = { level: k, res: 0, sup: 0 };
+    bins[k][e.r]++;
+  }
+  const keys = Object.keys(bins).map(Number).sort((a,b)=>a-b);
+  const zones = [], seen = new Set();
+  for (const k of keys) {
+    if (seen.has(k)) continue;
+    const b = { ...bins[k] };
+    if (bins[k+1]) { b.res += bins[k+1].res; b.sup += bins[k+1].sup; b.level = +((k+k+1)/2).toFixed(1); seen.add(k+1); }
+    b.touches = b.res + b.sup;
+    b.type    = b.res >= b.sup ? 'resistance' : 'support';
+    if (b.touches >= minT) zones.push(b);
+  }
+  zones.sort((a,b) => b.touches - a.touches);
+  const cur = v[v.length-1];
+  let srBias = null, srDetail = 'Không có S/R nổi bật';
+  for (const z of zones.slice(0, 3)) {
+    const diff = cur - z.level;
+    if (z.type === 'resistance') {
+      if (Math.abs(diff) <= 1.5) { srBias='X'; srDetail=`Kháng cự ${z.level} (${z.touches}x)`; break; }
+      if (diff > 0)               { srBias='T'; srDetail=`Vượt kháng cự ${z.level}`;             break; }
+    } else {
+      if (Math.abs(diff) <= 1.5) { srBias='T'; srDetail=`Hỗ trợ ${z.level} (${z.touches}x)`;    break; }
+      if (diff < 0)               { srBias='X'; srDetail=`Thủng hỗ trợ ${z.level}`;              break; }
+    }
+  }
+  return { zones: zones.slice(0, 4), srBias, srDetail };
+}
+
+// ════════════════════════════════════════════════════════════════
+//  B — DICE CONVERGENCE
+// ════════════════════════════════════════════════════════════════
+function analyzeDice(hist, win = 8) {
+  const slopes = [0, 1, 2].map(di => {
+    const vals = hist.map(h => Array.isArray(h.dice) ? h.dice[di] : null)
+                     .filter(v => v !== null).slice(-win);
+    if (vals.length < 3) return null;
+    const n = vals.length;
+    let sX=0, sY=0, sXY=0, sX2=0;
+    vals.forEach((v,i) => { sX+=i; sY+=v; sXY+=i*v; sX2+=i*i; });
+    const d = n*sX2 - sX*sX;
+    return d ? (n*sXY - sX*sY) / d : 0;
   });
+  const valid = slopes.filter(s => s !== null);
+  if (valid.length < 2) return { diceBias: null, diceDetail: 'Thiếu dữ liệu xúc xắc', convScore: 0 };
+  const up   = valid.filter(s => s >  0.12).length;
+  const down = valid.filter(s => s < -0.12).length;
+  const avg  = valid.reduce((a,s) => a+s, 0) / valid.length;
+  const last = hist.filter(h => h.dice).slice(-1)[0];
+  const proj = last ? +(last.dice.reduce((a,b)=>a+b,0) + avg*3).toFixed(1) : null;
+  let diceBias = null, diceDetail = '', convScore = 0;
+  if (up >= 2 || down >= 2) {
+    convScore = Math.max(up, down);
+    diceBias  = up >= down ? 'T' : 'X';
+    diceDetail = `${convScore}/3 xúc xắc ${up>=down?'▲ tăng':'▼ giảm'}${proj?' | proj≈'+proj:''}`;
+  } else {
+    diceDetail = `Phân kỳ (↑${up} ↓${down})${proj?' | proj≈'+proj:''}`;
+  }
+  return { diceBias, diceDetail, convScore, avgSlope: +avg.toFixed(3), proj };
 }
 
-function parseSession(s) {
-  if (!s || typeof s !== "object") return null;
-  // Support new API format: session, dice[], total, result
-  const phien = String(s.session ?? s.id ?? s._id ?? s.phien ?? s.sessionId ?? s.session_id ?? "?");
-  let dice = null;
-  for (const f of ["dice","dices","xucXac","xuc_xac","cubes","cube","results"]) {
-    if (Array.isArray(s[f]) && s[f].length >= 3) {
-      const d = s[f].slice(0,3).map(Number);
-      if (d.every(x => x >= 1 && x <= 6)) { dice = d; break; }
+// ════════════════════════════════════════════════════════════════
+//  C — STREAK / CẦU TÂM LÝ
+// ════════════════════════════════════════════════════════════════
+function analyzeStreak(hist) {
+  if (!hist || hist.length < 3) return { streakBias: null, streakDetail: 'Chưa đủ dữ liệu', streakLen: 0, strength: 0.3 };
+  const kqs = hist.slice(-20).map(h => h.kq);
+  let streak = 1;
+  const last = kqs[kqs.length - 1];
+  for (let i = kqs.length - 2; i >= 0; i--) {
+    if (kqs[i] === last) streak++;
+    else break;
+  }
+  let streakBias = null, streakDetail = '', strength = 0.3;
+  const opposite = last === 'T' ? 'X' : 'T';
+  if (streak >= 5) {
+    streakBias = opposite;
+    streakDetail = `Cầu ${fullLabel(last)} ${streak} phiên → Đổi chiều`;
+    strength = 0.88;
+  } else if (streak >= 3) {
+    streakBias = opposite;
+    streakDetail = `Cầu ${fullLabel(last)} ${streak} phiên → Cảnh báo`;
+    strength = 0.65;
+  } else if (streak === 2) {
+    streakBias = last;
+    streakDetail = `Cầu ${fullLabel(last)} ${streak} phiên → Theo đà`;
+    strength = 0.45;
+  } else {
+    streakDetail = `Không có cầu rõ`;
+    strength = 0.3;
+  }
+  // Cầu 1-1 (bệt xen kẽ)
+  if (streak === 1 && kqs.length >= 6) {
+    const alt = kqs.slice(-6).every((k, i) => i === 0 || k !== kqs[kqs.length-6+i-1]);
+    if (alt) {
+      streakBias = opposite;
+      streakDetail = `Cầu 1-1 xen kẽ → Tiếp tục`;
+      strength = 0.60;
     }
   }
-  if (!dice && s.d1 && s.d2 && s.d3) {
-    const d = [Number(s.d1), Number(s.d2), Number(s.d3)];
-    if (d.every(x => x >= 1 && x <= 6)) dice = d;
-  }
-  if (!dice) return null;
-  const tong = typeof s.total === "number" ? s.total
-             : typeof s.point === "number" ? s.point
-             : typeof s.sum   === "number" ? s.sum
-             : dice.reduce((a,b) => a+b, 0);
-  // Support "Tài"/"Xỉu" result strings from new API
-  const r = (s.result ?? s.resultTruyenThong ?? s.ketQua ?? s.ket_qua ?? s.type ?? "").toString().toUpperCase();
-  let type = null;
-  if (r.includes("TAI") || r.includes("TÀI") || r === "T" || r === "BIG"  || r === "1") type = "T";
-  else if (r.includes("XIU") || r.includes("XỈU") || r === "X" || r === "SMALL" || r === "0") type = "X";
-  else type = tong >= 11 ? "T" : "X";
-  return { phien, dice, tong, type };
+  return { streakBias, streakDetail, streakLen: streak, strength };
 }
 
-function ingest(list) {
-  const existing = new Set(history.map(h => h.phien));
-  for (const item of list.map(parseSession).filter(Boolean)) {
-    if (!existing.has(item.phien)) { history.push(item); existing.add(item.phien); }
-  }
-  history.sort((a,b) => Number(b.phien) - Number(a.phien));
-  if (history.length > HISTORY_MAX) history = history.slice(0, HISTORY_MAX);
-}
-
-async function syncHistory() {
-  try {
-    const res = await fetchSource();
-    if (!res.ok || !res.body) return;
-    const body = res.body;
-    // New API returns array directly or wrapped in data/list/history
-    const list = Array.isArray(body) ? body
-               : body.data ?? body.list ?? body.history ?? body.sessions ?? body.items ?? [];
-    if (Array.isArray(list)) ingest(list);
-  } catch (_) {}
-}
-
-// ════════════════════════════════════════════════════════════════════
-//  CORE MATH UTILITIES
-// ════════════════════════════════════════════════════════════════════
-function calcSlope(arr) {
-  const n = arr.length;
-  if (n < 2) return 0;
-  const y = [...arr].reverse();
-  const xMean = (n - 1) / 2;
-  const yMean = y.reduce((s,v)=>s+v,0) / n;
-  let num = 0, den = 0;
-  for (let i = 0; i < n; i++) {
-    num += (i - xMean) * (y[i] - yMean);
-    den += (i - xMean) ** 2;
-  }
-  return den < 1e-9 ? 0 : num / den;
-}
-function mean(arr) { if (!arr.length) return 0; return arr.reduce((s,v)=>s+v,0)/arr.length; }
-function stdDev(arr) { if (arr.length < 2) return 0; const m=mean(arr); return Math.sqrt(arr.reduce((s,v)=>s+(v-m)**2,0)/arr.length); }
-function ema(arr, period) { const y=[...arr].reverse(); const k=2/(period+1); let e=y[0]; for(let i=1;i<y.length;i++) e=y[i]*k+e*(1-k); return e; }
-function findPeaksValleys(arr) {
-  const n=arr.length; const peaks=[],valleys=[];
-  for(let i=1;i<n-1;i++){
-    if(arr[i]>=arr[i-1]&&arr[i]>=arr[i+1]&&arr[i]>arr[i+1]+0.5) peaks.push({i,v:arr[i]});
-    if(arr[i]<=arr[i-1]&&arr[i]<=arr[i+1]&&arr[i]<arr[i-1]-0.5) valleys.push({i,v:arr[i]});
-  }
-  return {peaks,valleys};
-}
-function findSupportResistance(arr, threshold=1.5) {
-  const {peaks,valleys}=findPeaksValleys(arr); const levels=[];
-  const cluster=(points)=>{
-    if(!points.length) return;
-    const sorted=[...points].sort((a,b)=>a.v-b.v); let group=[sorted[0]];
-    for(let i=1;i<sorted.length;i++){
-      if(sorted[i].v-group[group.length-1].v<=threshold) group.push(sorted[i]);
-      else { if(group.length>=2){ const avg=group.reduce((s,p)=>s+p.v,0)/group.length; levels.push({value:avg,strength:group.length}); } group=[sorted[i]]; }
-    }
-    if(group.length>=2){ const avg=group.reduce((s,p)=>s+p.v,0)/group.length; levels.push({value:avg,strength:group.length}); }
+// ════════════════════════════════════════════════════════════════
+//  META ENSEMBLE
+// ════════════════════════════════════════════════════════════════
+function ensembleVote(signals) {
+  const { pattern, slope, sr, dice, streak } = signals;
+  let sT = 0, sX = 0, tW = 0;
+  const sources = [];
+  const cast = (bias, w, name, detail, str = 1) => {
+    if (!bias) return;
+    const eff = w * Math.min(1.3, Math.max(0.3, str));
+    if (bias === 'T') sT += eff; else sX += eff;
+    tW += eff;
+    sources.push({ name, bias, biasFull: fullLabel(bias), detail, weight: +eff.toFixed(3) });
   };
-  cluster(peaks); cluster(valleys);
-  return levels.sort((a,b)=>b.strength-a.strength);
+  if (pattern?.bias)    cast(pattern.bias,    CFG.W_PATTERN, 'Mẫu hình',         pattern.name,        pattern.strength ?? 0.7);
+  if (slope?.slopeBias) cast(slope.slopeBias, CFG.W_SLOPE,   'Slope/Momentum',   slope.detail,        slope.strength   ?? 0.6);
+  if (sr?.srBias)       cast(sr.srBias,       CFG.W_SR,      'Hỗ trợ/Kháng cự', sr.srDetail,         0.8);
+  if (dice?.diceBias)   cast(dice.diceBias,   CFG.W_DICE,    'Đồng pha Xúc xắc', dice.diceDetail,    dice.convScore/3);
+  if (streak?.streakBias) cast(streak.streakBias, CFG.W_STREAK, 'Cầu tâm lý',    streak.streakDetail, streak.strength);
+  if (!tW) return null;
+  const rT = sT/tW, rX = sX/tW;
+  const winner = rT >= rX ? 'T' : 'X';
+  const rawConf = Math.max(rT, rX);
+  const conf    = calibrateConf(rawConf);
+  const clarity = rawConf>=.74?'Rõ ràng':rawConf>=.63?'Khá rõ':rawConf>=.56?'Trung bình':'Không rõ';
+  return { winner, winnerFull: fullLabel(winner), conf, rawConf: +rawConf.toFixed(4),
+           clarity, votes: { T: +sT.toFixed(3), X: +sX.toFixed(3) },
+           votePct: { T: `${(rT*100).toFixed(1)}%`, X: `${(rX*100).toFixed(1)}%` },
+           sources, patternName: pattern?.name ?? null };
 }
 
-// ════════════════════════════════════════════════════════════════════
-//  VIRTUAL CHART ENGINE
-// ════════════════════════════════════════════════════════════════════
-function buildVirtualCharts(hist, n=40) {
-  const slice=hist.slice(0,n);
-  return {
-    sumChart: slice.map(h=>h.tong),
-    diceCharts: { d1:slice.map(h=>h.dice[0]), d2:slice.map(h=>h.dice[1]), d3:slice.map(h=>h.dice[2]) },
-    typeSeq: slice.map(h=>h.type),
-    len: slice.length
-  };
-}
-
-// ════════════════════════════════════════════════════════════════════
-//  ALGORITHMS (v6 full suite)
-// ════════════════════════════════════════════════════════════════════
-function calcRSI(sumChart, period=10) {
-  if (sumChart.length < period+2) return null;
-  const y=[...sumChart].reverse(); const n=Math.min(y.length,period+10);
-  let gains=0,losses=0;
-  for(let i=y.length-n;i<y.length-1;i++){ const d=y[i+1]-y[i]; if(d>0) gains+=d; else losses-=d; }
-  if(gains+losses<0.001) return 50;
-  const ag=gains/(n-1),al=losses/(n-1);
-  if(al<0.001) return 100;
-  return 100-(100/(1+ag/al));
-}
-function analyzeRSI(sumChart) {
-  const rsi=calcRSI(sumChart); if(rsi===null) return null;
-  if(rsi>=72) return {signal:"X",conf:0.70+(rsi-72)*0.004,detail:`RSI=${rsi.toFixed(1)} quá mua → đảo chiều Xỉu`};
-  if(rsi<=28) return {signal:"T",conf:0.70+(28-rsi)*0.004,detail:`RSI=${rsi.toFixed(1)} quá bán → đảo chiều Tài`};
-  if(rsi>=60) return {signal:"X",conf:0.57,detail:`RSI=${rsi.toFixed(1)} vùng cao → thiên Xỉu`};
-  if(rsi<=40) return {signal:"T",conf:0.57,detail:`RSI=${rsi.toFixed(1)} vùng thấp → thiên Tài`};
-  return null;
-}
-function analyzeMACD(sumChart) {
-  if(sumChart.length<12) return null;
-  const fast3=ema(sumChart,3),fast4=ema(sumChart.slice(1),3),slow8=ema(sumChart,8),slow8p=ema(sumChart.slice(1),8);
-  const macd=fast3-slow8,macdP=fast4-slow8p;
-  if(macdP<0&&macd>0) return {signal:"T",conf:0.68,detail:`MACD golden cross (${macd.toFixed(2)}) → Tài`};
-  if(macdP>0&&macd<0) return {signal:"X",conf:0.68,detail:`MACD death cross (${macd.toFixed(2)}) → Xỉu`};
-  if(macd>0.5&&macd>macdP) return {signal:"T",conf:0.58,detail:`MACD histogram tăng ${macd.toFixed(2)}`};
-  if(macd<-0.5&&macd<macdP) return {signal:"X",conf:0.58,detail:`MACD histogram giảm ${macd.toFixed(2)}`};
-  return null;
-}
-function analyzeBollinger(sumChart) {
-  if(sumChart.length<12) return null;
-  const sub=sumChart.slice(0,12),m=mean(sub),sd=stdDev(sub);
-  const upper=m+2*sd,lower=m-2*sd,cur=sumChart[0],bw=(upper-lower)/m;
-  if(bw<0.18){ const s=calcSlope(sumChart.slice(0,5)); return {signal:s>=0?"T":"X",conf:0.62,detail:`Bollinger Squeeze BW=${(bw*100).toFixed(1)}% → breakout ${s>=0?'Tài':'Xỉu'}`}; }
-  if(cur>=upper-0.3) return {signal:"X",conf:0.67,detail:`Chạm Bollinger Upper ${upper.toFixed(1)} → hồi quy`};
-  if(cur<=lower+0.3) return {signal:"T",conf:0.67,detail:`Chạm Bollinger Lower ${lower.toFixed(1)} → bật lên`};
-  if(cur>upper) return {signal:"X",conf:0.72,detail:`Phá vỡ Bollinger Upper ${cur.toFixed(0)}>${upper.toFixed(1)} → đảo ngược`};
-  if(cur<lower) return {signal:"T",conf:0.72,detail:`Phá vỡ Bollinger Lower ${cur.toFixed(0)}<${lower.toFixed(1)} → đảo ngược`};
-  return null;
-}
-function analyzeFibonacci(sumChart) {
-  if(sumChart.length<10) return null;
-  const sub=sumChart.slice(0,20),hi=Math.max(...sub),lo=Math.min(...sub),rng=hi-lo;
-  if(rng<3) return null;
-  const cur=sumChart[0],slope10=calcSlope(sub);
-  const FIB=[0.236,0.382,0.500,0.618,0.786];
-  for(const f of FIB){
-    const rv=lo+rng*(1-f),ru=lo+rng*f;
-    if(Math.abs(cur-rv)<=0.5&&slope10<0) return {signal:"T",conf:0.60+f*0.08,detail:`Fib ${(f*100).toFixed(1)}% hồi từ ${hi} → hỗ trợ ${rv.toFixed(1)}`};
-    if(Math.abs(cur-ru)<=0.5&&slope10>0) return {signal:"X",conf:0.60+f*0.08,detail:`Fib ${(f*100).toFixed(1)}% hồi từ ${lo} → kháng cự ${ru.toFixed(1)}`};
-  }
-  return null;
-}
-function calcEntropy(typeSeq,window=20) {
-  const sub=typeSeq.slice(0,window); if(sub.length<5) return 1.0;
-  const cT=sub.filter(t=>t==="T").length,pT=cT/sub.length,pX=1-pT;
-  const h=p=>p<1e-9?0:-p*Math.log2(p); return h(pT)+h(pX);
-}
-function analyzeEntropy(typeSeq) {
-  const entropy=calcEntropy(typeSeq,20),cT=typeSeq.slice(0,20).filter(t=>t==="T").length,cX=20-cT;
-  if(entropy<0.7){ const dom=cT>cX?"T":"X",opp=dom==="T"?"X":"T"; return {signal:opp,conf:0.62+(0.7-entropy)*0.3,detail:`Entropy thấp ${entropy.toFixed(2)}: ${dom} chiếm ${Math.max(cT,cX)}/20 → kỳ vọng đảo`}; }
-  return null;
-}
-function analyzeStreak(typeSeq) {
-  if(typeSeq.length<4) return null;
-  let streak=1; const cur=typeSeq[0];
-  for(let i=1;i<typeSeq.length;i++){ if(typeSeq[i]===cur) streak++; else break; }
-  if(streak>=6){ const opp=cur==="T"?"X":"T"; return {signal:opp,conf:Math.min(0.70+streak*0.02,0.82),detail:`Streak ${streak} ${cur==="T"?"Tài":"Xỉu"} liên tiếp → đảo chiều mạnh`}; }
-  if(streak>=4){ const opp=cur==="T"?"X":"T"; return {signal:opp,conf:0.63+streak*0.02,detail:`Chuỗi ${streak} ${cur==="T"?"Tài":"Xỉu"} → kỳ vọng đảo`}; }
-  if(streak>=3){ const s=calcSlope(typeSeq.slice(0,5).map(t=>t==="T"?1:0)); if(Math.abs(s)>0.3) return {signal:cur,conf:0.57,detail:`Chuỗi ${streak} ${cur==="T"?"Tài":"Xỉu"} + momentum → tiếp tục`}; }
-  return null;
-}
-function analyzeVolumeProfile(sumChart) {
-  if(sumChart.length<20) return null;
-  const sub=sumChart.slice(0,Math.min(50,sumChart.length)),freq={};
-  for(let v=3;v<=18;v++) freq[v]=0;
-  sub.forEach(v=>{if(freq[Math.round(v)]!==undefined) freq[Math.round(v)]++;});
-  const cur=Math.round(sumChart[0]);
-  const sorted=Object.entries(freq).sort((a,b)=>b[1]-a[1]);
-  const hvn=sorted.slice(0,3).map(([v])=>Number(v)),lvn=sorted.slice(-3).map(([v])=>Number(v));
-  if(hvn.some(v=>Math.abs(v-cur)<=0.5)){ const s=calcSlope(sumChart.slice(0,5)); return {signal:s>=0?"X":"T",conf:0.63,detail:`Giá tại HVN ${cur} (tần suất ${freq[cur]}x) → ${s>=0?'kháng cự':'hỗ trợ'}`}; }
-  if(lvn.some(v=>Math.abs(v-cur)<=0.5)&&sumChart.length>=3){ const s=calcSlope(sumChart.slice(0,4)); if(Math.abs(s)>0.5) return {signal:s>=0?"T":"X",conf:0.59,detail:`Giá tại LVN ${cur} (thưa ${freq[cur]}x) → momentum tiếp`}; }
-  return null;
-}
-function analyzePatternFingerprint(typeSeq) {
-  const W=5; if(typeSeq.length<W+5) return null;
-  const rp=typeSeq.slice(0,W).join(""); let mT=0,mX=0;
-  for(let i=W;i<typeSeq.length-1;i++){
-    const cRev=typeSeq.slice(i,i+W).join("").split("").reverse().join("");
-    const rRev=rp.split("").reverse().join("");
-    if(cRev===rRev){ const next=typeSeq[i-1]; if(next==="T") mT++; else mX++; }
-  }
-  const tot=mT+mX; if(tot<3) return null;
-  const wr=Math.max(mT,mX)/tot;
-  if(wr>=0.65){ const pred=mT>=mX?"T":"X"; return {signal:pred,conf:Math.min(0.55+wr*0.25,0.78),detail:`Pattern ${rp.split("").reverse().join("")} → ${pred==="T"?"Tài":"Xỉu"} ${Math.round(wr*100)}% (${tot} mẫu)`}; }
-  return null;
-}
-function analyzeWaveCycle(sumChart) {
-  if(sumChart.length<16) return null;
-  const y=[...sumChart.slice(0,32)].reverse(),n=y.length,m=mean(y),centered=y.map(v=>v-m);
-  let bestLag=0,bestCorr=0;
-  for(let lag=2;lag<=8;lag++){ let corr=0; for(let i=0;i<n-lag;i++) corr+=centered[i]*centered[i+lag]; corr/=(n-lag); if(Math.abs(corr)>Math.abs(bestCorr)){bestCorr=corr;bestLag=lag;} }
-  if(Math.abs(bestCorr)<0.8) return null;
-  if(bestCorr>0){ const s=calcSlope(sumChart.slice(0,3)); return {signal:s>=0?"T":"X",conf:0.61,detail:`Chu kỳ ${bestLag} phiên, tương quan ${bestCorr.toFixed(2)} → tiếp pha`}; }
-  return null;
-}
-function calcATR(sumChart,period=8) {
-  if(sumChart.length<period+1) return null;
-  const trs=[]; for(let i=0;i<period;i++){ const c=sumChart[i],p=sumChart[i+1]??c; trs.push(Math.abs(c-p)); } return mean(trs);
-}
-function analyzeATRTrend(sumChart) {
-  const atr=calcATR(sumChart,8); if(atr===null) return null;
-  const s=calcSlope(sumChart.slice(0,6)),cur=sumChart[0];
-  if(atr>2.5&&Math.abs(s)>1.0) return {signal:s>0?"T":"X",conf:0.64,detail:`ATR=${atr.toFixed(2)} cao + slope=${s.toFixed(2)} → trend mạnh`};
-  if(atr<1.0) return {signal:cur>=10.5?"X":"T",conf:0.57,detail:`ATR=${atr.toFixed(2)} sideways → hồi về mean`};
-  return null;
-}
-function detectChartPattern(sumChart) {
-  if(sumChart.length<8) return {pattern:"Không đủ dữ liệu",signal:null,conf:0};
-  const y=[...sumChart].reverse(),n=y.length,{peaks,valleys}=findPeaksValleys(y);
-  if(valleys.length>=2){ const [v1,v2]=valleys.slice(-2); if(v1&&v2&&Math.abs(v1.v-v2.v)<=1.5){ const mp=peaks.find(p=>p.i>v1.i&&p.i<v2.i); if(mp&&mp.v>v1.v+2&&v2.i>=n*0.6) return {pattern:`Mẫu W đáy ${Math.round(v1.v)}-${Math.round(v2.v)}`,signal:"T",conf:0.68}; } }
-  if(peaks.length>=2){ const [p1,p2]=peaks.slice(-2); if(p1&&p2&&Math.abs(p1.v-p2.v)<=1.5){ const mv=valleys.find(v=>v.i>p1.i&&v.i<p2.i); if(mv&&mv.v<p1.v-2&&p2.i>=n*0.6) return {pattern:`Mẫu M đỉnh ${Math.round(p1.v)}-${Math.round(p2.v)}`,signal:"X",conf:0.68}; } }
-  if(peaks.length>=3){ const [lS,head,rS]=peaks.slice(-3); if(lS&&head&&rS&&head.v>lS.v+1.5&&head.v>rS.v+1.5&&Math.abs(lS.v-rS.v)<=2&&rS.i>=n*0.55) return {pattern:`Vai-Đầu-Vai đỉnh ${Math.round(head.v)}`,signal:"X",conf:0.71}; }
-  if(valleys.length>=3){ const [lS,head,rS]=valleys.slice(-3); if(lS&&head&&rS&&head.v<lS.v-1.5&&head.v<rS.v-1.5&&Math.abs(lS.v-rS.v)<=2&&rS.i>=n*0.55) return {pattern:`Vai-Đầu-Vai đảo đáy ${Math.round(head.v)}`,signal:"T",conf:0.71}; }
-  if(peaks.length>=3&&valleys.length>=3){ const rP=peaks.slice(-3),rV=valleys.slice(-3); if(rP.every((p,i)=>i===0||p.v>rP[i-1].v-0.5)&&rV.every((v,i)=>i===0||v.v>rV[i-1].v-0.5)) return {pattern:"Cầu thang tăng dần",signal:"T",conf:0.64}; if(rP.every((p,i)=>i===0||p.v<rP[i-1].v+0.5)&&rV.every((v,i)=>i===0||v.v<rV[i-1].v+0.5)) return {pattern:"Cầu thang giảm dần",signal:"X",conf:0.64}; }
-  return {pattern:"Không rõ mẫu hình",signal:null,conf:0};
-}
-function analyzeSlopeAndReversion(sumChart) {
-  if(sumChart.length<5) return null;
-  const s3=calcSlope(sumChart.slice(0,4)),s6=calcSlope(sumChart.slice(0,8)),cur=sumChart[0];
-  if(cur>=16&&s3>0.5) return {signal:"X",conf:0.70,detail:`Đụng kháng cự ${cur}, slope=${s3.toFixed(2)}`};
-  if(cur<=5&&s3<-0.5) return {signal:"T",conf:0.70,detail:`Chạm hỗ trợ ${cur}, slope=${s3.toFixed(2)}`};
-  if(cur>=13&&s3<-0.3&&s6>0.2) return {signal:"X",conf:0.62,detail:`Đảo chiều từ vùng cao ${cur}`};
-  if(cur<=8&&s3>0.3&&s6<-0.2) return {signal:"T",conf:0.62,detail:`Đảo chiều từ vùng thấp ${cur}`};
-  if(s3>1.5) return {signal:"T",conf:0.58,detail:`Slope tăng mạnh ${s3.toFixed(2)}`};
-  if(s3<-1.5) return {signal:"X",conf:0.58,detail:`Slope giảm mạnh ${s3.toFixed(2)}`};
-  return null;
-}
-function analyzeSupportResistance(sumChart) {
-  if(sumChart.length<10) return null;
-  const levels=findSupportResistance(sumChart.slice(0,30),1.5),cur=sumChart[0];
-  for(const lvl of levels.slice(0,4)){ if(Math.abs(cur-lvl.value)<=0.8){ const s=calcSlope(sumChart.slice(0,5)); return {signal:s>0?"X":"T",conf:Math.min(0.55+lvl.strength*0.03,0.72),detail:`${s>0?'Kháng cự':'Hỗ trợ'} ${lvl.value.toFixed(1)} (mạnh ${lvl.strength}x)`}; } }
-  return null;
-}
-function analyzeDicePhase(diceCharts) {
-  const s={d1:calcSlope(diceCharts.d1.slice(0,5)),d2:calcSlope(diceCharts.d2.slice(0,5)),d3:calcSlope(diceCharts.d3.slice(0,5))};
-  const up=Object.values(s).filter(x=>x>0.3).length,dn=Object.values(s).filter(x=>x<-0.3).length,tot=s.d1+s.d2+s.d3;
-  if(up===3) return {signal:"T",conf:0.65,detail:`Đồng pha 3 xúc xắc đâm lên (${tot.toFixed(2)})`};
-  if(dn===3) return {signal:"X",conf:0.65,detail:`Đồng pha 3 xúc xắc đâm xuống (${tot.toFixed(2)})`};
-  if(up===2&&tot>0.8) return {signal:"T",conf:0.57,detail:`2/3 xúc xắc đâm lên`};
-  if(dn===2&&tot<-0.8) return {signal:"X",conf:0.57,detail:`2/3 xúc xắc đâm xuống`};
-  return null;
-}
-function predictNextDiceValues(diceCharts) {
-  const p1=(arr)=>{ if(arr.length<3) return Math.round((arr[0]??3.5)*2)/2; const s=calcSlope(arr.slice(0,8)); let e=arr[0]+s*0.6; e-=(arr[0]-3.5)*0.15; return Math.min(6,Math.max(1,Math.round(e*2)/2)); };
-  return {d1:p1(diceCharts.d1),d2:p1(diceCharts.d2),d3:p1(diceCharts.d3)};
-}
-function analyzeDiceConvergence(diceCharts) {
-  if(diceCharts.d1.length<3) return null;
-  const cur=[diceCharts.d1[0],diceCharts.d2[0],diceCharts.d3[0]],spread=Math.max(...cur)-Math.min(...cur),sum=cur.reduce((a,b)=>a+b,0);
-  const prev=[diceCharts.d1[1]??cur[0],diceCharts.d2[1]??cur[1],diceCharts.d3[1]??cur[2]],psum=prev.reduce((a,b)=>a+b,0);
-  if(spread<=1) return {signal:sum>=10?"T":"X",conf:0.62,detail:`Hội tụ 3 viên spread=${spread} sum=${sum}`};
-  if(spread>=4) return {signal:sum>=psum?"X":"T",conf:0.57,detail:`Phân kỳ spread=${spread} → đảo`};
-  return null;
-}
-function analyzeZigzag(sumChart) {
-  if(sumChart.length<8) return null;
-  const n=Math.min(sumChart.length,16),sub=[...sumChart.slice(0,n)].reverse(); let flips=0;
-  for(let i=1;i<n-1;i++){ if((sub[i]>sub[i-1]&&sub[i]>sub[i+1])||(sub[i]<sub[i-1]&&sub[i]<sub[i+1])) flips++; }
-  const r=flips/(n-2);
-  if(r>0.65){ const s=calcSlope(sumChart.slice(0,3)); return {signal:s>0?"X":"T",conf:Math.min(0.60+r*0.10,0.72),detail:`Zigzag ${Math.round(r*100)}% → đảo`}; }
-  if(r<0.25){ const s=calcSlope(sumChart.slice(0,5)); return {signal:s>=0?"T":"X",conf:0.58,detail:`Zigzag thưa → tiếp xu hướng`}; }
-  return null;
-}
-function analyzeSumMomentum(sumChart) {
-  if(sumChart.length<10) return null;
-  const s3=calcSlope(sumChart.slice(0,3)),s6=calcSlope(sumChart.slice(0,6)),s10=calcSlope(sumChart.slice(0,10));
-  if(s3>0.2&&s6>0.1&&s10>0) return {signal:"T",conf:0.63,detail:`Momentum 3 khung ↑ (${s3.toFixed(1)}/${s6.toFixed(1)}/${s10.toFixed(1)})`};
-  if(s3<-0.2&&s6<-0.1&&s10<0) return {signal:"X",conf:0.63,detail:`Momentum 3 khung ↓ (${s3.toFixed(1)}/${s6.toFixed(1)}/${s10.toFixed(1)})`};
-  if(s3>0.3&&s10<-0.1) return {signal:"X",conf:0.58,detail:`Phân kỳ âm: tăng ngắn vs giảm dài`};
-  if(s3<-0.3&&s10>0.1) return {signal:"T",conf:0.58,detail:`Phân kỳ dương: giảm ngắn vs tăng dài`};
-  return null;
-}
-function analyzeCongestion(sumChart) {
-  if(sumChart.length<6) return null;
-  const sub=sumChart.slice(0,Math.min(sumChart.length,8)),rng=Math.max(...sub)-Math.min(...sub);
-  if(rng<=3){ const s=calcSlope(sub); return {signal:s>=0?"T":"X",conf:0.58,detail:`Tắc nghẽn range=${rng} → breakout`}; }
-  return null;
-}
-
-// ════════════════════════════════════════════════════════════════════
-//  CORE PREDICTOR v6
-// ════════════════════════════════════════════════════════════════════
+// ════════════════════════════════════════════════════════════════
+//  MAIN PREDICT
+// ════════════════════════════════════════════════════════════════
 function predictByVirtualChart(hist) {
-  if(hist.length<6) return {next:"?",nextDisplay:"Chưa đủ dữ liệu",conf:50,confDisplay:"50%",patternName:"N/A",signals:[],charts:null,rsi:null};
-  const N=Math.min(hist.length,40);
-  const {sumChart,diceCharts,typeSeq}=buildVirtualCharts(hist,N);
-
-  const sigPattern   =detectChartPattern(sumChart);
-  const sigSlope     =analyzeSlopeAndReversion(sumChart);
-  const sigSR        =analyzeSupportResistance(sumChart);
-  const sigDice      =analyzeDicePhase(diceCharts);
-  const sigConverge  =analyzeDiceConvergence(diceCharts);
-  const sigZigzag    =analyzeZigzag(sumChart);
-  const sigMomentum  =analyzeSumMomentum(sumChart);
-  const sigCong      =analyzeCongestion(sumChart);
-  const sigRSI       =analyzeRSI(sumChart);
-  const sigMACD      =analyzeMACD(sumChart);
-  const sigBoll      =analyzeBollinger(sumChart);
-  const sigFib       =analyzeFibonacci(sumChart);
-  const sigEntropy   =analyzeEntropy(typeSeq);
-  const sigStreak    =analyzeStreak(typeSeq);
-  const sigVProfile  =analyzeVolumeProfile(sumChart);
-  const sigFinger    =analyzePatternFingerprint(typeSeq);
-  const sigWave      =analyzeWaveCycle(sumChart);
-  const sigATR       =analyzeATRTrend(sumChart);
-
-  const vote={T:0.0,X:0.0},signals=[];
-  const register=(sig,weight,source)=>{ if(!sig||!sig.signal) return; vote[sig.signal]+=sig.conf*weight; signals.push({source,signal:sig.signal,conf:Math.round(sig.conf*100)+"%",detail:sig.detail??sig.pattern??""}); };
-
-  register({signal:sigPattern.signal,conf:sigPattern.conf,detail:sigPattern.pattern},4.0,"Chart Pattern");
-  register(sigStreak,     4.5,"Streak Bias");
-  register(sigFinger,     4.0,"Pattern Fingerprint");
-  register(sigRSI,        3.8,"RSI Oscillator");
-  register(sigMACD,       3.5,"MACD Crossover");
-  register(sigBoll,       3.5,"Bollinger Band");
-  register(sigMomentum,   3.5,"3-Frame Momentum");
-  register(sigZigzag,     3.0,"Zigzag Pattern");
-  register(sigFib,        3.0,"Fibonacci Level");
-  register(sigSlope,      3.0,"Slope+Reversion");
-  register(sigVProfile,   2.8,"Volume Profile");
-  register(sigSR,         2.5,"Support/Resistance");
-  register(sigEntropy,    2.5,"Entropy Bias");
-  register(sigATR,        2.2,"ATR Trend Filter");
-  register(sigDice,       2.0,"Dice Phase Sync");
-  register(sigConverge,   2.0,"Dice Convergence");
-  register(sigWave,       1.8,"Wave Cycle");
-  register(sigCong,       1.5,"Congestion Zone");
-
-  const curSum=sumChart[0];
-  if(curSum>=15){ vote["X"]+=0.65*1.5; signals.push({source:"Extreme Bias",signal:"X",conf:"65%",detail:`Tổng ${curSum}≥15 → hồi quy mạnh`}); }
-  if(curSum<=6){  vote["T"]+=0.65*1.5; signals.push({source:"Extreme Bias",signal:"T",conf:"65%",detail:`Tổng ${curSum}≤6 → bật lên mạnh`}); }
-
-  const tot=vote.T+vote.X;
-  let next="T",rawConf=0.50;
-  if(tot>1e-9){ next=vote.X>=vote.T?"X":"T"; rawConf=Math.max(vote.T,vote.X)/tot; }
-  const conf=Math.min(Math.max(0.50+(rawConf-0.50)*0.75,0.50),0.82);
-  const mainPattern=sigPattern.signal?sigPattern.pattern:(sigStreak?.detail??sigRSI?.detail??sigSlope?.detail??"Phân tích tổng hợp");
-  const nextDice=predictNextDiceValues(diceCharts);
-  const nextSum=nextDice.d1+nextDice.d2+nextDice.d3;
-  const rsiVal=calcRSI(sumChart);
-  const sub50=sumChart.slice(0,Math.min(50,sumChart.length));
-  const fibHi=Math.max(...sub50),fibLo=Math.min(...sub50),fibRng=fibHi-fibLo;
-  const fibLevels=fibRng>=3?[0.236,0.382,0.5,0.618,0.786].map(f=>({pct:f,value:+(fibLo+fibRng*(1-f)).toFixed(2)})):[];
-
-  const chartData={
-    sumChart:sumChart.slice(0,30),
-    diceCharts:{d1:diceCharts.d1.slice(0,30),d2:diceCharts.d2.slice(0,30),d3:diceCharts.d3.slice(0,30)},
-    srLevels:findSupportResistance(sumChart.slice(0,30),1.5).slice(0,5),
-    slope5:calcSlope(sumChart.slice(0,5)),
-    nextDice,nextSum,
-    rsi:rsiVal!==null?Math.round(rsiVal):null,
-    fibLevels,
-    typeSeq:typeSeq.slice(0,30),
-    bollingerMid:+mean(sumChart.slice(0,12)).toFixed(2),
-    bollingerUpper:+(mean(sumChart.slice(0,12))+2*stdDev(sumChart.slice(0,12))).toFixed(2),
-    bollingerLower:+(mean(sumChart.slice(0,12))-2*stdDev(sumChart.slice(0,12))).toFixed(2),
-    voteT:Math.round(vote.T*100)/100,
-    voteX:Math.round(vote.X*100)/100,
-  };
-
-  return {next,nextDisplay:next==="T"?"Tài":"Xỉu",conf:Math.round(conf*100),confDisplay:Math.round(conf*100)+"%",
-    patternName:mainPattern,votesT:Math.round(vote.T*100)/100,votesX:Math.round(vote.X*100)/100,
-    nextDice,nextSum,rsi:rsiVal!==null?Math.round(rsiVal):null,signals,charts:chartData};
+  if (!hist || hist.length < CFG.MIN_HIST) return null;
+  const slice   = hist.slice(-CFG.CANVAS_W);
+  const canvasA = slice.map(h => typeof h.tong === 'number' ? h.tong : null);
+  const pattern = scanPattern(canvasA);
+  const slope   = analyzeSlope(canvasA, 8);
+  const sr      = detectSR(canvasA, 2);
+  const dice    = analyzeDice(slice, 8);
+  const streak  = analyzeStreak(slice);
+  const ens     = ensembleVote({ pattern, slope, sr, dice, streak });
+  if (!ens) return null;
+  return { ...ens, patternName: ens.patternName ?? 'Không nhận diện mẫu hình', canvasA, slice, streak };
 }
 
-// ════════════════════════════════════════════════════════════════════
-//  HTML BUILDER (buildBandoHTML) — same as v6 original
-// ════════════════════════════════════════════════════════════════════
-function buildBandoHTML(pred, h) {
-  const c=pred.charts;
-  if(!c) return "<h2>Không đủ dữ liệu</h2>";
-  const sumData=JSON.stringify([...c.sumChart].reverse());
-  const d1Data=JSON.stringify([...c.diceCharts.d1].reverse());
-  const d2Data=JSON.stringify([...c.diceCharts.d2].reverse());
-  const d3Data=JSON.stringify([...c.diceCharts.d3].reverse());
-  const typeData=JSON.stringify([...c.typeSeq].reverse());
-  const n=c.sumChart.length;
-  const labels=JSON.stringify(Array.from({length:n},(_,i)=>n-1-i===0?"Now":`${-(n-1-i)}`));
-  const signalRows=pred.signals.map(s=>`<tr><td class="src-td">${s.source}</td><td class="${s.signal==='T'?'sig-t':'sig-x'}">${s.signal==='T'?'▲':'▼'} ${s.signal==='T'?'Tài':'Xỉu'} <span class="conf-badge">${s.conf}</span></td><td class="detail-td">${s.detail}</td></tr>`).join("");
-  const predColor=pred.next==="T"?"#f5c842":"#9b59ff";
-  const predBg=pred.next==="T"?"rgba(245,200,66,0.12)":"rgba(155,89,255,0.12)";
-  const rsiColor=pred.rsi===null?"#888":pred.rsi>=70?"#ff4444":pred.rsi<=30?"#44ff88":"#aaa";
-  const rsiLabel=pred.rsi===null?"N/A":pred.rsi>=70?"Quá Mua":pred.rsi<=30?"Quá Bán":"Trung Tính";
-  const totalVote=pred.votesT+pred.votesX;
-  const pctT=totalVote>0?Math.round(pred.votesT/totalVote*100):50;
-  const pctX=100-pctT;
+// ════════════════════════════════════════════════════════════════
+//  FETCH & POLLING
+// ════════════════════════════════════════════════════════════════
+async function fetchAndUpdate() {
+  try {
+    const res  = await fetch(SOURCE_API, { signal: AbortSignal.timeout(10000) });
+    const data = await res.json();
+    const items = Array.isArray(data.data) ? data.data
+                : Array.isArray(data)      ? data : [];
+    if (!items.length) return null;
 
-  return `<!DOCTYPE html>
+    const sorted   = [...items].sort((a, b) => a.session - b.session);
+    const latest   = sorted[sorted.length - 1];
+    const knownSet = new Set(history.map(h => h.phien));
+
+    for (const item of sorted) {
+      const phien = String(item.session);
+      if (knownSet.has(phien)) continue;
+      const dice = Array.isArray(item.dice) && item.dice.length === 3
+        ? item.dice.map(Number) : null;
+      const tong = typeof item.total === 'number'
+        ? item.total : (dice ? dice.reduce((a,b)=>a+b,0) : 0);
+      const kq = item.result === 'Tài' ? 'T'
+               : item.result === 'Xỉu' ? 'X'
+               : kqLabel(tong);
+      history.push({ phien, dice, tong, kq });
+      knownSet.add(phien);
+      if (pendingPred?.phien === phien) {
+        const win = pendingPred.predicted === kq;
+        winLoss.push({ phien, predicted: pendingPred.predicted, actual: kq, win, conf: pendingPred.conf });
+        if (winLoss.length > 200) winLoss = winLoss.slice(-100);
+        pendingPred = null;
+      }
+    }
+    if (history.length > CFG.MAX_HISTORY) history = history.slice(-CFG.MAX_HISTORY);
+
+    const pred    = predictByVirtualChart(history);
+    const phienN  = String(Number(latest.session) + 1);
+    if (pred) pendingPred = { phien: phienN, predicted: pred.winner, conf: pred.conf };
+
+    const recentWL = winLoss.slice(-50);
+    const wins     = recentWL.filter(r => r.win).length;
+    const winRate  = recentWL.length ? `${Math.round(wins/recentWL.length*100)}%` : 'Chưa có';
+    const pattern30 = history.slice(-50).map(h => h.kq).join('');
+    const latestTong = typeof latest.total === 'number' ? latest.total
+      : (Array.isArray(latest.dice) ? latest.dice.reduce((a,b)=>a+b,0) : 0);
+    const latestKq = kqLabel(latestTong);
+
+    latestResult = {
+      phien:          String(latest.session),
+      xuc_xac:        Array.isArray(latest.dice) ? latest.dice.map(Number) : null,
+      ket_qua:        fullLabel(latestKq),
+      phien_hien_tai: phienN,
+      du_doan:        pred ? fullLabel(pred.winner) : null,
+      do_tin_cay:     pred ? `${pred.conf}%` : null,
+      pattern:        pattern30,
+      dev:            '@sewdangcap',
+    };
+    return latestResult;
+  } catch (e) {
+    console.error('[fetchAndUpdate]', e.message);
+    return null;
+  }
+}
+
+(async () => { await fetchAndUpdate(); })();
+setInterval(fetchAndUpdate, CFG.POLL_MS);
+
+// ════════════════════════════════════════════════════════════════
+//  EXPRESS
+// ════════════════════════════════════════════════════════════════
+app.use(cors());
+app.use(express.json());
+
+// ════════════════════════════════════════════════════════════════
+//  / — DASHBOARD HTML (game-style nhà cái)
+// ════════════════════════════════════════════════════════════════
+app.get('/', (req, res) => {
+  const hist   = history.slice(-CFG.CANVAS_W);
+  const pred   = predictByVirtualChart(history);
+  const latest = history[history.length - 1];
+
+  if (!latest) return res.send(`<!DOCTYPE html><html><body style="background:#1a0535;color:#e8d8ff;font-family:sans-serif;padding:2rem;text-align:center">
+    <h2 style="color:#f5c842">⏳ Đang khởi động...</h2><p>Kết nối API nguồn...</p>
+    <script>setTimeout(()=>location.reload(),3000)</script></body></html>`);
+
+  const nxtPhien   = String(Number(latest.phien) + 1);
+  const taiCount50 = history.slice(-50).filter(h => h.kq === 'T').length;
+  const xiuCount50 = history.slice(-50).length - taiCount50;
+  const recentWL   = winLoss.slice(-50);
+  const wr         = recentWL.length ? Math.round(recentWL.filter(r=>r.win).length/recentWL.length*100)+'%' : '—';
+  const pattern50  = history.slice(-50).map(h => h.kq).join('');
+  const streak     = pred?.streak ?? analyzeStreak(hist);
+
+  const chartAData  = JSON.stringify(hist.map(h => h.tong));
+  const chartBD1    = JSON.stringify(hist.map(h => h.dice ? h.dice[0] : null));
+  const chartBD2    = JSON.stringify(hist.map(h => h.dice ? h.dice[1] : null));
+  const chartBD3    = JSON.stringify(hist.map(h => h.dice ? h.dice[2] : null));
+  const chartLabels = JSON.stringify(hist.map(h => '#' + String(h.phien).slice(-4)));
+  const predJson    = pred ? JSON.stringify({
+    winner: pred.winner, winnerFull: fullLabel(pred.winner),
+    conf: pred.conf, clarity: pred.clarity,
+    pctT: pred.votePct.T, pctX: pred.votePct.X,
+    patternName: pred.patternName ?? '—',
+    sources: pred.sources,
+    streak: streak,
+  }) : 'null';
+
+  res.send(`<!DOCTYPE html>
 <html lang="vi">
 <head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>SOI CẦU v6 — SUNWIN Analytics</title>
-<link href="https://fonts.googleapis.com/css2?family=Rajdhani:wght@400;600;700&family=Share+Tech+Mono&display=swap" rel="stylesheet">
-<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/chartjs-plugin-annotation/3.0.1/chartjs-plugin-annotation.min.js"></script>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>Tài Xỉu — Chart Engine v4.0</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
-:root{--gold:#c8960a;--gold-lite:#f5c842;--tai:#f5c842;--xiu:#9b59ff;--bg:#0a0804;--bg2:#120c06;--bg3:#1a1108;--border:rgba(200,150,10,0.35);--text:#e8d8a0;--text-dim:#9a7a40;--mono:'Share Tech Mono',monospace;--head:'Rajdhani',sans-serif;}
-body{background:var(--bg);min-height:100vh;color:var(--text);font-family:var(--head);padding:10px;background-image:radial-gradient(ellipse at 20% 10%,rgba(120,60,0,0.18) 0%,transparent 60%),radial-gradient(ellipse at 80% 90%,rgba(60,0,120,0.12) 0%,transparent 60%);}
-.hdr{display:flex;align-items:center;justify-content:space-between;background:linear-gradient(90deg,#200800,#0f0500,#200800);border:1px solid var(--border);border-radius:10px;padding:10px 16px;margin-bottom:10px;position:relative;overflow:hidden;}
-.hdr::before{content:'';position:absolute;inset:0;background:repeating-linear-gradient(90deg,transparent,transparent 40px,rgba(200,150,10,0.03) 40px,rgba(200,150,10,0.03) 41px);}
-.hdr-title{font-size:1.3rem;font-weight:700;letter-spacing:4px;background:linear-gradient(90deg,#ffd700,#fff4a0,#ffd700);-webkit-background-clip:text;-webkit-text-fill-color:transparent;}
-.hdr-badge{display:flex;gap:12px;font-family:var(--mono);font-size:.78rem;color:var(--text-dim);}
-.hdr-badge .val{color:var(--gold-lite);font-weight:bold;} .hdr-badge .type-t{color:var(--tai);} .hdr-badge .type-x{color:var(--xiu);}
-.metrics-row{display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:8px;margin-bottom:10px;}
-.metric-card{background:var(--bg2);border:1px solid var(--border);border-radius:8px;padding:10px 12px;position:relative;overflow:hidden;}
-.metric-card::after{content:'';position:absolute;top:0;left:0;right:0;height:2px;background:var(--accent,var(--gold));}
-.metric-label{font-size:.65rem;color:var(--text-dim);text-transform:uppercase;letter-spacing:.8px;margin-bottom:4px;}
-.metric-val{font-size:1.5rem;font-weight:700;font-family:var(--mono);color:var(--accent,var(--gold-lite));line-height:1;}
-.metric-sub{font-size:.65rem;color:var(--text-dim);margin-top:3px;}
-.chart-card{background:linear-gradient(180deg,#160b04 0%,#0e0602 100%);border:1px solid var(--border);border-radius:10px;padding:12px;position:relative;}
-.chart-card-title{font-size:.68rem;text-transform:uppercase;letter-spacing:1.5px;color:var(--text-dim);margin-bottom:10px;display:flex;align-items:center;gap:6px;}
-.chart-card-title span{background:var(--border);width:18px;height:18px;border-radius:4px;display:flex;align-items:center;justify-content:center;font-size:.75rem;}
-.rsi-row{display:flex;align-items:center;gap:10px;margin-bottom:10px;}
-.rsi-bar-wrap{flex:1;height:8px;background:rgba(255,255,255,0.08);border-radius:4px;position:relative;overflow:visible;}
-.rsi-bar-fill{height:100%;border-radius:4px;}
-.rsi-zones{position:absolute;top:0;left:30%;width:40%;height:100%;background:rgba(255,255,255,0.06);border-radius:2px;}
-.rsi-needle{position:absolute;top:-4px;width:3px;height:16px;border-radius:2px;background:#fff;box-shadow:0 0 6px rgba(255,255,255,0.6);transform:translateX(-50%);}
-.rsi-val{font-family:var(--mono);font-size:.85rem;min-width:36px;text-align:right;}
-.rsi-tag{font-size:.68rem;min-width:60px;color:var(--text-dim);}
-.bead-road{display:flex;flex-wrap:wrap;gap:4px;padding:8px 0;}
-.bead{width:24px;height:24px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-family:var(--mono);font-size:.65rem;font-weight:700;}
-.bead-t{background:radial-gradient(circle at 35% 35%,#ffe080,#c8900a,#7a4f00);color:#fff;box-shadow:0 0 4px rgba(200,150,10,0.5);}
-.bead-x{background:radial-gradient(circle at 35% 35%,#c49aff,#7b2fff,#3a0090);color:#fff;box-shadow:0 0 4px rgba(155,89,255,0.5);}
-.vote-wrap{margin:8px 0;}
-.vote-bar{display:flex;height:10px;border-radius:5px;overflow:hidden;background:rgba(255,255,255,0.05);}
-.vote-t{background:linear-gradient(90deg,#c8900a,#f5c842);}
-.vote-x{background:linear-gradient(90deg,#7b2fff,#b388ff);}
-.vote-labels{display:flex;justify-content:space-between;font-family:var(--mono);font-size:.72rem;margin-top:3px;}
-.vote-labels .lbl-t{color:var(--tai);} .vote-labels .lbl-x{color:var(--xiu);}
-.pred-row{display:grid;grid-template-columns:auto 1fr;gap:10px;margin-bottom:10px;align-items:start;}
-.pred-main{background:${predBg};border:2px solid ${predColor};border-radius:12px;padding:16px 20px;text-align:center;min-width:150px;box-shadow:0 0 30px ${predColor}33;position:relative;overflow:hidden;}
-.pred-main::before{content:'';position:absolute;inset:-50%;background:radial-gradient(circle,${predColor}08,transparent 70%);animation:pulse 3s ease-in-out infinite;}
-@keyframes pulse{0%,100%{transform:scale(1);opacity:0.5}50%{transform:scale(1.15);opacity:1}}
-.pred-label{font-size:.65rem;color:var(--text-dim);text-transform:uppercase;letter-spacing:1px;}
-.pred-val{font-size:3rem;font-weight:700;color:${predColor};text-shadow:0 0 20px ${predColor};line-height:1.1;margin:4px 0;}
-.pred-phien{font-size:.72rem;color:var(--text-dim);}
-.pred-conf{font-family:var(--mono);font-size:1.1rem;color:#fff;margin-top:4px;}
-.conf-track{height:5px;background:rgba(255,255,255,0.1);border-radius:3px;margin:6px 0;overflow:hidden;}
-.conf-fill{height:100%;border-radius:3px;background:${predColor};width:${pred.conf}%;}
-.pred-pattern{font-size:.68rem;color:var(--gold-lite);margin-top:6px;line-height:1.4;}
-.signals-wrap{background:var(--bg2);border:1px solid var(--border);border-radius:10px;padding:10px;overflow:hidden;}
-.signals-title{font-size:.68rem;text-transform:uppercase;letter-spacing:1px;color:var(--text-dim);margin-bottom:8px;}
-.sig-table{width:100%;border-collapse:collapse;font-size:.72rem;}
-.sig-table th{color:var(--text-dim);padding:3px 5px;border-bottom:1px solid var(--border);text-align:left;font-weight:400;font-size:.65rem;text-transform:uppercase;}
-.sig-table td{padding:4px 5px;border-bottom:1px solid rgba(255,255,255,0.04);vertical-align:top;}
-.src-td{color:#8a6a30;font-family:var(--mono);font-size:.68rem;}
-.sig-t{color:var(--tai);font-weight:700;white-space:nowrap;} .sig-x{color:var(--xiu);font-weight:700;white-space:nowrap;}
-.conf-badge{background:rgba(255,255,255,0.1);border-radius:3px;padding:0 3px;font-size:.65rem;font-family:var(--mono);}
-.detail-td{color:#8a7050;font-size:.68rem;line-height:1.3;}
-.legend{display:flex;gap:14px;flex-wrap:wrap;padding:6px 10px;background:var(--bg2);border:1px solid var(--border);border-radius:8px;margin-bottom:10px;font-size:.72rem;}
-.legend-item{display:flex;align-items:center;gap:5px;color:var(--text-dim);}
-.dot{width:12px;height:12px;border-radius:50%;flex-shrink:0;}
-.next-dice{display:flex;gap:10px;justify-content:center;margin:8px 0;}
-.dice-chip{width:44px;height:44px;border-radius:8px;background:radial-gradient(circle at 35% 30%,rgba(255,255,255,0.2),rgba(0,0,0,0.5));border:2px solid var(--border);display:flex;align-items:center;justify-content:center;font-family:var(--mono);font-size:1.4rem;font-weight:700;color:var(--gold-lite);box-shadow:inset 0 1px 0 rgba(255,255,255,0.15),0 2px 8px rgba(0,0,0,0.4);}
-@media(max-width:600px){.pred-row{grid-template-columns:1fr;}.metrics-row{grid-template-columns:repeat(3,1fr);}}
-</style></head><body>
-<div class="hdr">
-  <div class="hdr-title">⬦ SOI CẦU v6 — SUNWIN ⬦</div>
-  <div class="hdr-badge">
-    <span>Phiên <span class="val">#${h.phien}</span></span>
-    <span class="${h.type==='T'?'type-t':'type-x'} val">${h.type==='T'?'Tài':'Xỉu'}</span>
-    <span>${h.dice.join('·')}</span>
-    <span>Tổng <span class="val">${h.tong}</span></span>
-    <span style="color:#666">${new Date().toLocaleTimeString('vi-VN')}</span>
-  </div>
-</div>
-<div class="metrics-row">
-  <div class="metric-card" style="--accent:${pred.next==='T'?'var(--tai)':'var(--xiu)'}">
-    <div class="metric-label">Dự Đoán</div>
-    <div class="metric-val">${pred.nextDisplay}</div>
-    <div class="metric-sub">Phiên #${Number(h.phien)+1}</div>
-  </div>
-  <div class="metric-card" style="--accent:#44aaff">
-    <div class="metric-label">Độ Tin Cậy</div>
-    <div class="metric-val">${pred.confDisplay}</div>
-    <div class="metric-sub">Ensemble ${pred.signals.length} signals</div>
-  </div>
-  <div class="metric-card" style="--accent:${rsiColor}">
-    <div class="metric-label">RSI</div>
-    <div class="metric-val" style="color:${rsiColor}">${pred.rsi??'--'}</div>
-    <div class="metric-sub">${rsiLabel}</div>
-  </div>
-  <div class="metric-card" style="--accent:#ff8844">
-    <div class="metric-label">Tổng Dự Đoán</div>
-    <div class="metric-val">${pred.nextSum}</div>
-    <div class="metric-sub">${pred.nextDice.d1}·${pred.nextDice.d2}·${pred.nextDice.d3}</div>
-  </div>
-  <div class="metric-card" style="--accent:#44ff88">
-    <div class="metric-label">Tổng Hiện Tại</div>
-    <div class="metric-val">${h.tong}</div>
-    <div class="metric-sub">${h.dice.join('·')}</div>
-  </div>
-</div>
-<div style="background:var(--bg2);border:1px solid var(--border);border-radius:10px;padding:10px;margin-bottom:10px;">
-  <div class="chart-card-title" style="margin-bottom:6px;"><span>⬤</span> Cầu Hạt — 30 Phiên Gần Nhất (Trái=Cũ, Phải=Mới)</div>
-  <div class="bead-road" id="beadRoad"></div>
-</div>
-<div style="background:var(--bg2);border:1px solid var(--border);border-radius:10px;padding:10px;margin-bottom:10px;">
-  <div class="chart-card-title"><span>⚖</span> Phân Bổ Phiếu Bầu Thuật Toán</div>
-  <div class="vote-wrap">
-    <div class="vote-bar">
-      <div class="vote-t" style="width:${pctT}%"></div>
-      <div class="vote-x" style="width:${pctX}%"></div>
-    </div>
-    <div class="vote-labels">
-      <span class="lbl-t">▲ Tài ${pctT}% (${pred.votesT})</span>
-      <span class="lbl-x">▼ Xỉu ${pctX}% (${pred.votesX})</span>
-    </div>
-  </div>
-</div>
-<div style="background:var(--bg2);border:1px solid var(--border);border-radius:10px;padding:10px 12px;margin-bottom:10px;">
-  <div class="chart-card-title"><span>〰</span> RSI Momentum Oscillator</div>
-  <div class="rsi-row">
-    <span class="rsi-tag" style="color:#44ff88;font-size:.7rem">Quá Bán 30</span>
-    <div class="rsi-bar-wrap">
-      <div class="rsi-zones"></div>
-      <div class="rsi-bar-fill" style="width:${pred.rsi??50}%;background:linear-gradient(90deg,#44ff88,#ffaa22,#ff4444)"></div>
-      <div class="rsi-needle" style="left:${pred.rsi??50}%;background:${rsiColor}"></div>
-    </div>
-    <span class="rsi-tag" style="color:#ff4444;font-size:.7rem;text-align:right">Quá Mua 70</span>
-    <span class="rsi-val" style="color:${rsiColor}">${pred.rsi??'--'}</span>
-  </div>
-</div>
-<div class="chart-card" style="margin-bottom:10px;">
-  <div class="chart-card-title"><span>📈</span> Biểu Đồ Tổng — Bollinger + Fibonacci + S/R</div>
-  <canvas id="sumChart" height="180"></canvas>
-</div>
-<div class="chart-card" style="margin-bottom:10px;overflow-x:auto;">
-  <div class="chart-card-title"><span>🎲</span> Biểu Đồ 3 Xúc Xắc — Đồng Pha &amp; Xu Hướng</div>
-  <canvas id="diceCanvas"></canvas>
-</div>
-<div class="pred-row">
-  <div class="pred-main">
-    <div class="pred-label">Dự Đoán Phiên</div>
-    <div class="pred-phien">#${Number(h.phien)+1}</div>
-    <div class="pred-val">${pred.nextDisplay}</div>
-    <div class="conf-track"><div class="conf-fill"></div></div>
-    <div class="pred-conf">${pred.confDisplay}</div>
-    <div style="margin:8px 0 4px;font-size:.65rem;color:var(--text-dim)">Viên Xúc Xắc Dự Đoán</div>
-    <div class="next-dice">
-      <div class="dice-chip">${pred.nextDice.d1}</div>
-      <div class="dice-chip">${pred.nextDice.d2}</div>
-      <div class="dice-chip">${pred.nextDice.d3}</div>
-    </div>
-    <div class="pred-pattern">📐 ${pred.patternName}</div>
-  </div>
-  <div class="signals-wrap">
-    <div class="signals-title">Tín Hiệu Phân Tích — ${pred.signals.length} Nguồn</div>
-    <div style="max-height:300px;overflow-y:auto;">
-    <table class="sig-table">
-      <thead><tr><th>Thuật Toán</th><th>Tín Hiệu</th><th>Chi Tiết</th></tr></thead>
-      <tbody>${signalRows||'<tr><td colspan="3" style="color:#555;padding:8px">Không có tín hiệu</td></tr>'}</tbody>
-    </table>
-    </div>
-  </div>
-</div>
-<div class="legend">
-  <div class="legend-item"><span class="dot" style="background:#00c8ff"></span>Xúc Xắc 1</div>
-  <div class="legend-item"><span class="dot" style="background:#ff3cac"></span>Xúc Xắc 2</div>
-  <div class="legend-item"><span class="dot" style="background:#ffe03a"></span>Xúc Xắc 3</div>
-  <div class="legend-item"><span class="dot" style="background:var(--tai)"></span>Tài ≥11</div>
-  <div class="legend-item"><span class="dot" style="background:var(--xiu)"></span>Xỉu ≤10</div>
-  <div class="legend-item"><span class="dot" style="background:rgba(255,200,0,0.5)"></span>Fibonacci</div>
-  <div class="legend-item"><span class="dot" style="background:rgba(255,100,50,0.5)"></span>S/R Level</div>
-  <div class="legend-item"><span class="dot" style="background:rgba(100,200,255,0.3)"></span>Bollinger</div>
-</div>
-<script>
-Chart.register(window['chartjs-plugin-annotation']);
-const LABELS=${labels},SUM_DATA=${sumData},D1_DATA=${d1Data},D2_DATA=${d2Data},D3_DATA=${d3Data};
-const TYPE_DATA=${typeData},N=SUM_DATA.length;
-const BOLL_UP=${c.bollingerUpper},BOLL_MID=${c.bollingerMid},BOLL_LOW=${c.bollingerLower};
+html,body{background:#0f0220;color:#e8d8ff;font-family:'Segoe UI',Tahoma,sans-serif;min-height:100vh}
 
-const beadContainer=document.getElementById('beadRoad');
-[...TYPE_DATA].reverse().forEach((t,i)=>{
-  const b=document.createElement('div');
-  b.className='bead bead-'+(t==='T'?'t':'x');
-  b.textContent=t==='T'?'T':'X';
-  beadContainer.appendChild(b);
-});
+/* ── LAYOUT ── */
+.wrap{max-width:480px;margin:0 auto;padding:0 0 20px}
 
-const ptColors=SUM_DATA.map(v=>v>=11?'#c8900a':'#5a1aaa');
-const ptBorders=SUM_DATA.map(v=>v>=11?'#f5c842':'#b388ff');
-const labelPlugin={id:'pointLabel',afterDatasetsDraw(chart){const{ctx,data}=chart;const ds=chart.getDatasetMeta(0);ds.data.forEach((pt,i)=>{const val=data.datasets[0].data[i];if(val===undefined||val===null)return;const isTai=val>=11;ctx.save();ctx.beginPath();ctx.arc(pt.x,pt.y,13,0,Math.PI*2);ctx.fillStyle=isTai?'#c8900a':'#5a1aaa';ctx.fill();ctx.strokeStyle=isTai?'#f5c842':'#b388ff';ctx.lineWidth=2;ctx.stroke();ctx.fillStyle='#fff';ctx.font='bold 10px Share Tech Mono,monospace';ctx.textAlign='center';ctx.textBaseline='middle';ctx.fillText(val,pt.x,pt.y);ctx.restore();});}};
+/* ── HEADER ── */
+.title-bar{
+  background:linear-gradient(180deg,#6a3fa0 0%,#4a2070 100%);
+  text-align:center;padding:11px 16px;
+  border-bottom:2px solid #8b5fd0;
+  position:relative;
+}
+.title-bar::before,.title-bar::after{
+  content:'';position:absolute;top:50%;transform:translateY(-50%);
+  width:28px;height:2px;background:#f5c842;
+}
+.title-bar::before{left:10px}.title-bar::after{right:10px}
+.title-bar h1{color:#f0e8ff;font-size:15px;font-weight:700;letter-spacing:1px}
 
-const srAnno={};
-${c.srLevels.map((s,i)=>`srAnno['sr${i}']={type:'line',scaleID:'y',value:${s.value.toFixed(2)},borderColor:'rgba(255,100,50,0.30)',borderWidth:1.5,borderDash:[5,3]};`).join('\n')}
-const fibAnno={};
-${c.fibLevels.map((f,i)=>`fibAnno['fib${i}']={type:'line',scaleID:'y',value:${f.value},borderColor:'rgba(255,200,0,0.22)',borderWidth:1,borderDash:[2,4],label:{content:'Fib ${Math.round(f.pct*100)}%',display:true,color:'rgba(255,200,0,0.45)',font:{size:9},position:'start'}};`).join('\n')}
+/* ── SESSION INFO ── */
+.session-info{text-align:center;padding:7px 0 1px;font-size:13px;font-weight:700;color:#f0d8ff}
+.session-sub{text-align:center;font-size:12px;color:#c0a0f0;padding-bottom:4px}
 
-new Chart(document.getElementById('sumChart').getContext('2d'),{
-  type:'line',plugins:[labelPlugin],
-  data:{labels:LABELS,datasets:[
-    {label:'BB Upper',data:Array(N).fill(BOLL_UP),borderColor:'rgba(100,180,255,0.25)',borderWidth:1,borderDash:[3,3],pointRadius:0,fill:false,tension:0},
-    {label:'BB Lower',data:Array(N).fill(BOLL_LOW),borderColor:'rgba(100,180,255,0.25)',borderWidth:1,borderDash:[3,3],pointRadius:0,fill:{target:'-1',above:'rgba(100,180,255,0.06)',below:'rgba(100,180,255,0.06)'},tension:0},
-    {label:'BB Mid',data:Array(N).fill(BOLL_MID),borderColor:'rgba(100,180,255,0.18)',borderWidth:1,borderDash:[6,4],pointRadius:0,fill:false,tension:0},
-    {label:'Tổng',data:SUM_DATA,borderColor:'rgba(255,255,255,0.9)',borderWidth:2.5,pointRadius:14,pointHoverRadius:16,pointBackgroundColor:ptColors,pointBorderColor:ptBorders,pointBorderWidth:2,tension:0,fill:false,order:0}
-  ]},
-  options:{responsive:true,animation:{duration:400},layout:{padding:{top:12,bottom:4}},
-    scales:{y:{min:3,max:18,ticks:{color:'#9a7040',stepSize:3,font:{size:11,weight:'bold',family:'Share Tech Mono'}},grid:{color:'rgba(160,100,40,0.12)'},border:{color:'rgba(160,100,40,0.3)'}},x:{ticks:{color:'#8a6030',maxTicksLimit:12,font:{size:9,family:'Share Tech Mono'}},grid:{color:'rgba(160,100,40,0.07)'},border:{color:'rgba(160,100,40,0.3)'}}},
-    plugins:{legend:{display:false},annotation:{annotations:{midLine:{type:'line',scaleID:'y',value:10.5,borderColor:'rgba(255,255,255,0.15)',borderWidth:1,borderDash:[6,4]},taiZone:{type:'box',scaleID:'y',yMin:11,yMax:18,backgroundColor:'rgba(245,200,66,0.03)',borderWidth:0},xiuZone:{type:'box',scaleID:'y',yMin:3,yMax:10.5,backgroundColor:'rgba(155,89,255,0.03)',borderWidth:0},...srAnno,...fibAnno}},tooltip:{backgroundColor:'rgba(10,8,4,0.95)',titleColor:'#ffd700',bodyColor:'#f0d0a0',callbacks:{label:ctx=>{const v=ctx.parsed.y;if(!Number.isInteger(v)&&ctx.dataset.label!=='Tổng') return ctx.dataset.label+': '+v.toFixed(1);return \`Tổng: \${v}  →  \${v>=11?'🟡 Tài':'🟣 Xỉu'}\`;}}}}
-  }
-});
-
-(function drawDiceCanvas(){
-  const canvas=document.getElementById('diceCanvas');
-  const n=D1_DATA.length,colW=Math.max(38,Math.floor((window.innerWidth-48)/n)),W=colW*n+60,H=200;
-  canvas.width=W;canvas.height=H;canvas.style.width=W+'px';canvas.style.height=H+'px';
-  const ctx=canvas.getContext('2d');
-  const bg=ctx.createLinearGradient(0,0,0,H);bg.addColorStop(0,'#160b04');bg.addColorStop(1,'#0e0602');
-  ctx.fillStyle=bg;ctx.fillRect(0,0,W,H);
-  const PAD_L=36,PAD_R=10,PAD_T=16,PAD_B=20,plotW=W-PAD_L-PAD_R,plotH=H-PAD_T-PAD_B;
-  const yOf=v=>PAD_T+plotH-((v-1)/5)*plotH,xOf=i=>PAD_L+(i+0.5)*(plotW/n);
-  for(let v=1;v<=6;v++){const y=yOf(v);ctx.beginPath();ctx.moveTo(PAD_L,y);ctx.lineTo(W-PAD_R,y);ctx.strokeStyle='rgba(200,150,60,0.15)';ctx.lineWidth=1;ctx.stroke();ctx.fillStyle='#9a7040';ctx.font='bold 10px Share Tech Mono,monospace';ctx.textAlign='right';ctx.textBaseline='middle';ctx.fillText(v,PAD_L-4,y);}
-  const series=[D1_DATA,D2_DATA,D3_DATA],lineColors=['#ff3333','#22cc44','#ff8800'];
-  const ballColors=[{base:'#00c8ff',shine:'#80f0ff',shadow:'#0070aa'},{base:'#ff22cc',shine:'#ff90ee',shadow:'#990077'},{base:'#ffe020',shine:'#fff090',shadow:'#aa8800'}];
-  ctx.save();ctx.beginPath();ctx.moveTo(xOf(0),yOf(D1_DATA[0]));for(let i=1;i<n;i++) ctx.lineTo(xOf(i),yOf(D1_DATA[i]));for(let i=n-1;i>=0;i--) ctx.lineTo(xOf(i),yOf(D3_DATA[i]));ctx.closePath();ctx.fillStyle='rgba(255,255,255,0.03)';ctx.fill();ctx.restore();
-  series.forEach((data,di)=>{ctx.save();ctx.beginPath();ctx.moveTo(xOf(0),yOf(data[0]));for(let i=1;i<n;i++) ctx.lineTo(xOf(i),yOf(data[i]));ctx.strokeStyle=lineColors[di];ctx.lineWidth=2;ctx.shadowColor=lineColors[di];ctx.shadowBlur=4;ctx.stroke();ctx.restore();});
-  const R=Math.min(12,Math.floor(colW*0.32));
-  function drawBall(cx,cy,c){ctx.save();ctx.beginPath();ctx.arc(cx+2,cy+2,R,0,Math.PI*2);ctx.fillStyle='rgba(0,0,0,0.4)';ctx.fill();ctx.restore();const g=ctx.createRadialGradient(cx-R*.3,cy-R*.3,R*.1,cx,cy,R);g.addColorStop(0,c.shine);g.addColorStop(.45,c.base);g.addColorStop(1,c.shadow);ctx.save();ctx.beginPath();ctx.arc(cx,cy,R,0,Math.PI*2);ctx.fillStyle=g;ctx.fill();ctx.restore();const hl=ctx.createRadialGradient(cx-R*.3,cy-R*.38,0,cx-R*.3,cy-R*.38,R*.55);hl.addColorStop(0,'rgba(255,255,255,0.72)');hl.addColorStop(1,'rgba(255,255,255,0)');ctx.save();ctx.beginPath();ctx.arc(cx,cy,R,0,Math.PI*2);ctx.fillStyle=hl;ctx.fill();ctx.restore();}
-  series.forEach((data,di)=>{for(let i=0;i<n;i++) drawBall(xOf(i),yOf(data[i]),ballColors[di]);});
-  series.forEach((data,di)=>{const last=data[n-1],prev=data[Math.max(0,n-4)],dir=last>prev?-1:last<prev?1:0;if(dir===0) return;const ax=xOf(n-1)+colW*.55,ay=yOf(last);ctx.save();ctx.strokeStyle=ballColors[di].base;ctx.lineWidth=2.5;ctx.shadowColor=ballColors[di].base;ctx.shadowBlur=8;ctx.beginPath();ctx.moveTo(ax,ay);ctx.lineTo(ax+10,ay+dir*14);ctx.stroke();ctx.beginPath();ctx.moveTo(ax+10,ay+dir*14);ctx.lineTo(ax+6,ay+dir*9);ctx.lineTo(ax+14,ay+dir*9);ctx.closePath();ctx.fillStyle=ballColors[di].base;ctx.fill();ctx.restore();});
-  ctx.save();ctx.fillStyle='rgba(255,200,100,0.5)';ctx.font='9px Share Tech Mono,monospace';ctx.textAlign='center';ctx.fillText('NEXT',xOf(n-1)+colW*.6,PAD_T-4);ctx.restore();
-})();
-setTimeout(()=>location.reload(),12000);
-</script></body></html>`;
+/* ── CHART SECTION ── */
+.chart-section{padding:6px 10px}
+.chart-lbl{font-size:9px;color:#7050a0;text-transform:uppercase;letter-spacing:1px;margin-bottom:3px}
+.chart-box{
+  background:rgba(0,0,0,0.3);
+  border:1px solid rgba(160,100,255,0.2);
+  border-radius:8px;padding:8px 6px 4px;
 }
 
-// ════════════════════════════════════════════════════════════════════
-//  HTTP SERVER — with /sunlon route added
-// ════════════════════════════════════════════════════════════════════
-http.createServer(async (req, res) => {
-  const url = new URL(req.url, "http://localhost");
-  if (req.method === "OPTIONS") { res.writeHead(204, {"Access-Control-Allow-Origin":"*"}); res.end(); return; }
+/* ── DICE LEGEND ── */
+.dice-leg{display:flex;justify-content:center;gap:16px;padding:5px 0 2px;font-size:10px}
+.dl{display:flex;align-items:center;gap:4px}
+.ld{width:11px;height:11px;border-radius:50%;border:2px solid rgba(255,255,255,0.4)}
 
-  await syncHistory();
+/* ── PREDICTION BOX ── */
+.pred-box{
+  margin:5px 10px;
+  background:rgba(0,0,0,0.4);
+  border:1px solid rgba(180,100,255,0.25);
+  border-radius:10px;padding:10px 14px;
+}
+.pred-hdr{font-size:9px;color:#7050a0;text-transform:uppercase;letter-spacing:1px;margin-bottom:6px}
+.pred-row{display:flex;align-items:center;justify-content:space-between;gap:8px}
+.pred-main{font-size:38px;font-weight:800;line-height:1}
+.pred-main.tai{color:#00e676}
+.pred-main.xiu{color:#ff6b35}
+.pred-pct{font-size:11px;color:#9070b0;margin-top:3px}
+.pred-pat{font-size:10px;color:#b090d0;margin-top:2px}
+.pred-streak{font-size:10px;margin-top:3px;padding:3px 8px;border-radius:4px;display:inline-block}
+.pred-streak.warn{background:rgba(255,200,0,0.12);color:#f5c842;border:1px solid rgba(245,200,66,0.25)}
+.pred-streak.safe{background:rgba(0,230,118,0.1);color:#00e676;border:1px solid rgba(0,230,118,0.2)}
 
-  // ── /bando ──────────────────────────────────────────────────────
-  if (url.pathname === "/bando") {
-    if (!history.length) { res.writeHead(503,{"Content-Type":"text/plain;charset=utf-8"}); res.end("Chưa có dữ liệu"); return; }
-    const h=history[0],pred=predictByVirtualChart(history);
-    res.writeHead(200,{"Content-Type":"text/html;charset=utf-8"});
-    res.end(buildBandoHTML(pred,h)); return;
+/* ── CONFIDENCE RING ── */
+.conf-wrap{text-align:center;flex-shrink:0}
+.conf-ring{position:relative;width:76px;height:76px;display:inline-block}
+.conf-ring canvas{position:absolute;top:0;left:0}
+.conf-center{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;pointer-events:none}
+.conf-pct{font-size:19px;font-weight:700}
+.conf-lbl{font-size:9px;color:#8060a0;margin-top:1px}
+
+/* ── SIGNALS GRID ── */
+.sigs{display:grid;grid-template-columns:1fr 1fr;gap:5px;margin:5px 10px}
+.sig{background:rgba(0,0,0,0.3);border:1px solid rgba(160,100,255,0.15);border-radius:7px;padding:6px 9px}
+.sig-name{font-size:9px;color:#6040a0;text-transform:uppercase;letter-spacing:.4px}
+.sig-val{font-size:11px;font-weight:600;margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.sig-val.tai{color:#00e676}.sig-val.xiu{color:#ff6b35}.sig-val.neu{color:#c0a0e0}
+
+/* ── METRICS ── */
+.metrics{display:grid;grid-template-columns:repeat(4,1fr);gap:5px;margin:6px 10px}
+.mc{background:rgba(0,0,0,0.3);border:1px solid rgba(160,100,255,0.15);border-radius:7px;padding:7px 6px;text-align:center}
+.mc-l{font-size:8px;color:#6040a0;text-transform:uppercase;letter-spacing:.4px;margin-bottom:3px}
+.mc-v{font-size:16px;font-weight:700}
+.mc-s{font-size:9px;color:#7050a0;margin-top:1px}
+
+/* ── HISTORY ── */
+.hist-box{margin:5px 10px;background:rgba(0,0,0,0.3);border:1px solid rgba(160,100,255,0.15);border-radius:8px;padding:8px 10px}
+.hist-hdr{font-size:9px;color:#7050a0;text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px}
+.hist-row{display:grid;grid-template-columns:44px 48px 1fr 30px;gap:4px;align-items:center;padding:4px 0;border-bottom:1px solid rgba(255,255,255,0.04);font-size:11px}
+.hist-row:last-child{border-bottom:none}
+.kq-pill{display:inline-block;padding:2px 6px;border-radius:20px;font-size:9px;font-weight:700;text-align:center}
+.kq-pill.tai{background:rgba(0,230,118,0.12);color:#00e676;border:1px solid rgba(0,230,118,0.2)}
+.kq-pill.xiu{background:rgba(255,107,53,0.12);color:#ff6b35;border:1px solid rgba(255,107,53,0.2)}
+.dice-set{display:flex;gap:2px}
+.d{width:15px;height:15px;border-radius:3px;display:flex;align-items:center;justify-content:center;font-size:9px;font-weight:700;color:#fff}
+.d-r{background:#c0281e}.d-y{background:#b08900}.d-p{background:#6b28b0}
+
+/* ── PATTERN ── */
+.pat-wrap{display:flex;flex-wrap:wrap;gap:2px;padding:6px 10px}
+.pb{width:17px;height:17px;border-radius:3px;display:flex;align-items:center;justify-content:center;font-size:9px;font-weight:700}
+.pb-t{background:rgba(0,230,118,0.15);color:#00e676}
+.pb-x{background:rgba(255,107,53,0.15);color:#ff6b35}
+.pat-stats{display:flex;justify-content:center;gap:18px;padding:3px 0 6px;font-size:11px}
+
+/* ── BUTTONS ── */
+.btns{display:flex;justify-content:space-around;padding:8px 10px 0;gap:8px}
+.gbtn{
+  flex:1;padding:9px 6px;border-radius:24px;border:none;
+  font-size:11px;font-weight:800;letter-spacing:.8px;cursor:pointer;
+  display:flex;align-items:center;justify-content:center;gap:4px;
+  transition:opacity .15s;
+}
+.gbtn:active{opacity:.75}
+.gbtn-p{background:linear-gradient(180deg,#9060d0,#5a2888);color:#fff;border:2px solid #c080f0}
+.gbtn-g{background:linear-gradient(180deg,#f0c030,#b08000);color:#2a1000;border:2px solid #f5c842}
+.gbtn-r{background:linear-gradient(180deg,#ff4455,#b01020);color:#fff;border:2px solid #ff7788}
+.check{font-size:12px}
+
+/* ── FOOTER ── */
+.footer{text-align:center;font-size:9px;color:rgba(180,120,255,0.3);padding:8px 0 0;display:flex;justify-content:center;gap:12px}
+.footer a{color:rgba(160,100,255,0.5);text-decoration:none}
+
+/* ── LIVE DOT ── */
+.live-dot{width:6px;height:6px;border-radius:50%;background:#00e676;display:inline-block;animation:pulse 1.4s infinite;margin-right:3px;vertical-align:middle}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.2}}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<div class="title-bar">
+  <h1>Lịch Sử Phiên</h1>
+</div>
+
+<div class="session-info">
+  <span class="live-dot"></span>
+  Phiên gần nhất: <b>#${latest.phien}</b>
+</div>
+<div class="session-sub">
+  ${latest.kq==='T'?'Tài':'Xỉu'}(${latest.dice ? latest.dice.join('-') : latest.tong})
+</div>
+
+<div class="metrics">
+  <div class="mc">
+    <div class="mc-l">Kết quả</div>
+    <div class="mc-v" style="color:${latest.kq==='T'?'#00e676':'#ff6b35'};font-size:14px">${latest.kq==='T'?'TÀI':'XỈU'}</div>
+    <div class="mc-s">${latest.tong}</div>
+  </div>
+  <div class="mc">
+    <div class="mc-l">Dự đoán</div>
+    <div class="mc-v" style="color:${pred?(pred.winner==='T'?'#00e676':'#ff6b35'):'#7050a0'};font-size:14px">${pred?fullLabel(pred.winner):'...'}</div>
+    <div class="mc-s">#${nxtPhien.slice(-5)}</div>
+  </div>
+  <div class="mc">
+    <div class="mc-l">Tài/Xỉu</div>
+    <div class="mc-v" style="font-size:14px">${taiCount50}<span style="color:#5040a0">/</span>${xiuCount50}</div>
+    <div class="mc-s">50 phiên</div>
+  </div>
+  <div class="mc">
+    <div class="mc-l">Win rate</div>
+    <div class="mc-v" style="color:#f5c842;font-size:14px">${wr}</div>
+    <div class="mc-s">${recentWL.length}p theo dõi</div>
+  </div>
+</div>
+
+<!-- CHART A -->
+<div class="chart-section">
+  <div class="chart-lbl">Chart A — Đường Tổng (3–18)</div>
+  <div class="chart-box">
+    <div style="position:relative;height:190px">
+      <canvas id="cvA"></canvas>
+    </div>
+  </div>
+</div>
+
+<!-- CHART B -->
+<div class="chart-section" style="padding-top:3px">
+  <div class="chart-lbl">Chart B — 3 Xúc Xắc (1–6)</div>
+  <div class="chart-box">
+    <div style="position:relative;height:155px">
+      <canvas id="cvB"></canvas>
+    </div>
+  </div>
+  <div class="dice-leg">
+    <div class="dl"><div class="ld" style="background:#d03040;border-color:#ff8090"></div><span style="color:#ff8090">Xúc xắc 1</span></div>
+    <div class="dl"><div class="ld" style="background:#c09000;border-color:#f5c842"></div><span style="color:#f5c842">Xúc xắc 2</span></div>
+    <div class="dl"><div class="ld" style="background:#7030b0;border-color:#b060e0"></div><span style="color:#b060e0">Xúc xắc 3</span></div>
+  </div>
+</div>
+
+<!-- PREDICTION -->
+${pred ? `
+<div class="pred-box">
+  <div class="pred-hdr">Dự đoán phiên #${nxtPhien.slice(-5)}</div>
+  <div class="pred-row">
+    <div>
+      <div class="pred-main ${pred.winner==='T'?'tai':'xiu'}">${fullLabel(pred.winner)}</div>
+      <div class="pred-pct">Tài ${pred.votePct.T} · Xỉu ${pred.votePct.X}</div>
+      <div class="pred-pat">${pred.patternName ?? '—'}</div>
+      ${streak?.streakDetail ? `<div class="pred-streak ${streak.streakLen>=3?'warn':'safe'}">⚡ ${streak.streakDetail}</div>` : ''}
+    </div>
+    <div class="conf-wrap">
+      <div class="conf-ring">
+        <canvas id="cvConf" width="76" height="76"></canvas>
+        <div class="conf-center">
+          <span class="conf-pct" style="color:${pred.winner==='T'?'#00e676':'#ff6b35'}">${pred.conf}%</span>
+          <span class="conf-lbl">${pred.clarity}</span>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>` : `<div class="pred-box" style="text-align:center;padding:1.2rem;color:#6040a0">Đang phân tích...</div>`}
+
+<!-- SIGNALS -->
+<div class="sigs">
+  ${(pred?.sources ?? []).slice(0,4).map(s=>`
+  <div class="sig">
+    <div class="sig-name">${s.name}</div>
+    <div class="sig-val ${s.bias==='T'?'tai':s.bias==='X'?'xiu':'neu'}">${s.biasFull??'—'} · ${s.detail.slice(0,28)}</div>
+  </div>`).join('')}
+</div>
+
+<!-- HISTORY -->
+<div class="hist-box">
+  <div class="hist-hdr">Lịch sử 15 phiên gần nhất</div>
+  ${history.slice(-15).reverse().map(h=>`
+  <div class="hist-row">
+    <span style="color:#6040a0">#${String(h.phien).slice(-5)}</span>
+    <span class="kq-pill ${h.kq==='T'?'tai':'xiu'}">${fullLabel(h.kq)}</span>
+    <span class="dice-set">${h.dice?['d-r','d-y','d-p'].map((c,i)=>`<span class="d ${c}">${h.dice[i]}</span>`).join(''):'–'}</span>
+    <span style="font-weight:700;text-align:right;color:${h.kq==='T'?'#00e676':'#ff6b35'}">${h.tong}</span>
+  </div>`).join('')}
+</div>
+
+<!-- PATTERN 50 -->
+<div class="pat-wrap">
+  ${pattern50.split('').map(c=>`<span class="pb ${c==='T'?'pb-t':'pb-x'}">${c}</span>`).join('')}
+</div>
+<div class="pat-stats">
+  <span style="color:#00e676;font-weight:700">T: ${taiCount50}</span>
+  <span style="color:#4030a0">|</span>
+  <span style="color:#ff6b35;font-weight:700">X: ${xiuCount50}</span>
+  <span style="color:#4030a0">|</span>
+  <span style="color:#8060b0;font-size:10px">${((taiCount50/Math.max(1,taiCount50+xiuCount50))*100).toFixed(0)}% Tài</span>
+</div>
+
+<!-- BUTTONS -->
+<div class="btns">
+  <button class="gbtn gbtn-p"><span class="check">✔</span> XÍ NGẦU</button>
+  <button class="gbtn gbtn-g"><span class="check">✔</span> XÍ NGẦU</button>
+  <button class="gbtn gbtn-r"><span class="check">✔</span> XÍ NGẦU</button>
+</div>
+
+<!-- FOOTER -->
+<div class="footer">
+  <span>Virtual Chart Engine v4.0 · @sewdangcap</span>
+  <a href="/sunlon">API</a>
+  <a href="/signals">Signals</a>
+  <a href="/thongke">Thống kê</a>
+  <a href="/history">History</a>
+</div>
+
+</div><!-- /wrap -->
+
+<script>
+const DATA_A   = ${chartAData};
+const DATA_B1  = ${chartBD1};
+const DATA_B2  = ${chartBD2};
+const DATA_B3  = ${chartBD3};
+const LABELS   = ${chartLabels};
+const PRED     = ${predJson};
+const TAI_LINE = ${CFG.TAI_LINE};
+
+// ── Chart A ──
+const ptColors = DATA_A.map(v => v===null?'rgba(255,255,255,.2)':v>=TAI_LINE?'#00e676':'#ff6b35');
+const ptSizes  = DATA_A.map((_,i)=>i===DATA_A.length-1?8:4);
+const ptBorder = DATA_A.map(v=>v>=TAI_LINE?'rgba(0,230,118,0.35)':'rgba(255,107,53,0.35)');
+
+new Chart(document.getElementById('cvA'),{
+  type:'line',
+  data:{ labels:LABELS, datasets:[{
+    data:DATA_A,
+    borderColor:'rgba(220,200,255,0.6)',
+    backgroundColor:'rgba(120,60,200,0.06)',
+    borderWidth:2,
+    pointBackgroundColor:ptColors,
+    pointBorderColor:ptBorder,
+    pointBorderWidth:3,
+    pointRadius:ptSizes,
+    pointHoverRadius:9,
+    tension:0.28,fill:true,
+  }]},
+  options:{
+    responsive:true,maintainAspectRatio:false,
+    plugins:{
+      legend:{display:false},
+      tooltip:{
+        backgroundColor:'rgba(15,2,32,0.92)',
+        titleColor:'#b090d0',bodyColor:'#f0d8ff',
+        borderColor:'rgba(160,100,255,0.3)',borderWidth:1,
+        callbacks:{label:c=>'Tổng: '+c.parsed.y+' — '+(c.parsed.y>=TAI_LINE?'TÀI':'XỈU')}
+      }
+    },
+    scales:{
+      x:{ticks:{font:{size:8},color:'rgba(180,130,255,0.45)',maxTicksLimit:12,maxRotation:0},
+         grid:{color:'rgba(140,80,200,0.1)'},border:{color:'rgba(140,80,200,0.2)'}},
+      y:{min:2,max:19,
+         ticks:{font:{size:8},color:'rgba(180,130,255,0.45)',stepSize:3,
+           callback:v=>v===TAI_LINE?v+'—':v},
+         grid:{color:ctx=>ctx.tick.value===TAI_LINE?'rgba(245,200,66,0.22)':'rgba(140,80,200,0.1)'},
+         border:{color:'rgba(140,80,200,0.2)'}},
+    }
   }
-
-  // ── /sunlon ─────────────────────────────────────────────────────
-  // ── /sunlon — JSON API ──────────────────────────────────────────
-  if (url.pathname === "/sunlon") {
-    if (!history.length) { res.writeHead(503,{"Content-Type":"application/json;charset=utf-8"}); res.end(JSON.stringify({loi:"Chưa có dữ liệu"})); return; }
-    const h=history[0],pred=predictByVirtualChart(history);
-    // pattern: chuỗi T/X 20 phiên gần nhất (oldest→newest)
-    const pattern=history.slice(0,20).map(x=>x.type).reverse().join("");
-    res.writeHead(200,{"Content-Type":"application/json;charset=utf-8","Access-Control-Allow-Origin":"*"});
-    res.end(JSON.stringify({
-      phien:           h.phien,
-      xuc_xac:         h.dice,
-      ket_qua:         h.type==="T"?"Tài":"Xỉu",
-      phien_hien_tai:  String(Number(h.phien)+1),
-      du_doan:         pred.nextDisplay,
-      do_tin_cay:      pred.confDisplay,
-      pattern:         pattern,
-      dev:             "@sewdangcap"
-    })); return;
-  }
-
-  res.setHeader("Content-Type","application/json;charset=utf-8");
-  res.setHeader("Access-Control-Allow-Origin","*");
-
-  // ── / or /predict ────────────────────────────────────────────────
-  if (url.pathname === "/" || url.pathname === "/predict") {
-    if (!history.length) { res.writeHead(503); res.end(JSON.stringify({loi:"Chưa có dữ liệu"})); return; }
-    const h=history[0],pred=predictByVirtualChart(history);
-    res.writeHead(200);
-    res.end(JSON.stringify({
-      phien_hien_tai:h.phien,xuc_xac:h.dice,tong_hien_tai:h.tong,
-      ket_qua_hien:h.type==="T"?"Tài":"Xỉu",
-      phien_du_doan:String(Number(h.phien)+1),
-      du_doan:pred.nextDisplay,do_tin_cay:pred.confDisplay,
-      rsi:pred.rsi,id:"@sewdangcap"
-    })); return;
-  }
-
-  // ── /predict/detail ──────────────────────────────────────────────
-  if (url.pathname === "/predict/detail") {
-    if (!history.length) { res.writeHead(503); res.end(JSON.stringify({loi:"Chưa có dữ liệu"})); return; }
-    const pred=predictByVirtualChart(history);
-    res.writeHead(200);
-    res.end(JSON.stringify({du_doan:pred.nextDisplay,do_tin_cay:pred.confDisplay,mau_hinh:pred.patternName,rsi:pred.rsi,phieu_tai:pred.votesT,phieu_xiu:pred.votesX,tin_hieu:pred.signals,bieu_do:pred.charts})); return;
-  }
-
-  // ── /history ────────────────────────────────────────────────────
-  if (url.pathname === "/history") {
-    const lim=Math.min(parseInt(url.searchParams.get("limit")||"20"),200);
-    res.writeHead(200);
-    res.end(JSON.stringify({tong_so:history.length,du_lieu:history.slice(0,lim).map(h=>({phien:h.phien,xuc_xac:h.dice,tong:h.tong,ket_qua:h.type==="T"?"Tài":"Xỉu"}))})); return;
-  }
-
-  // ── /debug ───────────────────────────────────────────────────────
-  if (url.pathname === "/debug") {
-    const r=await fetchSource().catch(e=>({loi:e.message}));
-    res.writeHead(200);
-    res.end(JSON.stringify(r,null,2)); return;
-  }
-
-  res.writeHead(404);
-  res.end(JSON.stringify({loi:"Không tìm thấy endpoint",endpoints:["/predict","/predict/detail","/history","/bando","/sunlon","/debug"]}));
-
-}).listen(PORT, () => {
-  console.log("✅  SicBo v6.0 Casino-Grade — port " + PORT);
-  console.log("    Dashboard : http://localhost:" + PORT + "/bando");
-  console.log("    Sunlon    : http://localhost:" + PORT + "/sunlon");
-  console.log("    API Source: " + SOURCE_URL);
-  console.log("    Algorithms: RSI · MACD · Bollinger · Fibonacci · Entropy");
-  console.log("                Streak · VolumeProfile · PatternHash · WaveCycle · ATR");
-  syncHistory();
-  setInterval(syncHistory, 12000);
 });
+
+// ── Chart B ──
+new Chart(document.getElementById('cvB'),{
+  type:'line',
+  data:{ labels:LABELS, datasets:[
+    {label:'D1',data:DATA_B1,borderColor:'#d03040',backgroundColor:'transparent',borderWidth:2,
+     pointBackgroundColor:'#d03040',pointBorderColor:'rgba(255,100,120,0.4)',pointBorderWidth:2,pointRadius:4,tension:0.28},
+    {label:'D2',data:DATA_B2,borderColor:'#b09000',backgroundColor:'transparent',borderWidth:2,
+     pointBackgroundColor:'#b09000',pointBorderColor:'rgba(240,190,60,0.4)',pointBorderWidth:2,pointRadius:4,tension:0.28},
+    {label:'D3',data:DATA_B3,borderColor:'#7030b0',backgroundColor:'transparent',borderWidth:2,
+     pointBackgroundColor:'#7030b0',pointBorderColor:'rgba(160,80,220,0.4)',pointBorderWidth:2,pointRadius:4,tension:0.28},
+  ]},
+  options:{
+    responsive:true,maintainAspectRatio:false,
+    plugins:{legend:{display:false},tooltip:{backgroundColor:'rgba(15,2,32,0.92)',titleColor:'#b090d0',bodyColor:'#f0d8ff',borderColor:'rgba(160,100,255,0.3)',borderWidth:1}},
+    scales:{
+      x:{ticks:{font:{size:8},color:'rgba(180,130,255,0.45)',maxTicksLimit:12,maxRotation:0},
+         grid:{color:'rgba(140,80,200,0.1)'},border:{color:'rgba(140,80,200,0.2)'}},
+      y:{min:0,max:7,ticks:{font:{size:8},color:'rgba(180,130,255,0.45)',stepSize:1},
+         grid:{color:'rgba(140,80,200,0.1)'},border:{color:'rgba(140,80,200,0.2)'}},
+    }
+  }
+});
+
+// ── Confidence Ring ──
+if(PRED){
+  const cv=document.getElementById('cvConf');
+  if(cv){
+    const ctx=cv.getContext('2d');
+    const col=PRED.winner==='T'?'#00e676':'#ff6b35';
+    const pct=PRED.conf/100;
+    ctx.clearRect(0,0,76,76);
+    ctx.beginPath();ctx.arc(38,38,28,0,Math.PI*2);ctx.strokeStyle='rgba(255,255,255,0.07)';ctx.lineWidth=5;ctx.stroke();
+    ctx.beginPath();ctx.arc(38,38,28,-Math.PI/2,-Math.PI/2+Math.PI*2*pct);ctx.strokeStyle=col;ctx.lineWidth=5;ctx.lineCap='round';ctx.stroke();
+  }
+}
+
+// ── Auto reload ──
+setTimeout(()=>location.reload(), ${CFG.POLL_MS});
+</script>
+</body>
+</html>`);
+});
+
+// ════════════════════════════════════════════════════════════════
+//  /sunlon — JSON dự đoán
+// ════════════════════════════════════════════════════════════════
+app.get('/sunlon', async (req, res) => {
+  if (!latestResult) {
+    const d = await fetchAndUpdate();
+    if (!d) return res.status(503).json({ error: 'Đang khởi động, thử lại sau...' });
+  }
+  res.json(latestResult);
+});
+
+// ── /api/sunlon — alias ───────────────────────────────────────
+app.get('/api/sunlon', async (req, res) => {
+  if (!latestResult) {
+    const d = await fetchAndUpdate();
+    if (!d) return res.status(503).json({ error: 'Đang khởi động, thử lại sau...' });
+  }
+  res.json(latestResult);
+});
+
+// ════════════════════════════════════════════════════════════════
+//  /canvas — Snapshot 2 biểu đồ
+// ════════════════════════════════════════════════════════════════
+app.get('/canvas', (req, res) => {
+  if (history.length < CFG.MIN_HIST)
+    return res.status(503).json({ error: 'Chưa đủ dữ liệu' });
+  const slice  = history.slice(-CFG.CANVAS_W);
+  const phiens = slice.map(h => Number(h.phien));
+  res.json({
+    id: '@sewdangcap',
+    canvas_width: slice.length,
+    chart_A: {
+      mo_ta: 'Đường Tổng — trục Y: 3–18 — Tài≥11 / Xỉu<11',
+      y_min: 3, y_max: 18,
+      data: phiens.map((p, i) => ({ phien: p, tong: slice[i].tong, kq: fullLabel(slice[i].kq) })),
+    },
+    chart_B: {
+      mo_ta: '3 Đường Xúc Xắc — Đỏ/Vàng/Tím — trục Y: 1–6',
+      y_min: 1, y_max: 6,
+      data: phiens.map((p, i) => ({
+        phien: p,
+        d1: slice[i].dice?.[0] ?? null,
+        d2: slice[i].dice?.[1] ?? null,
+        d3: slice[i].dice?.[2] ?? null,
+      })),
+    },
+  });
+});
+
+// ════════════════════════════════════════════════════════════════
+//  /signals — Chi tiết 5 tín hiệu
+// ════════════════════════════════════════════════════════════════
+app.get('/signals', (req, res) => {
+  if (history.length < CFG.MIN_HIST)
+    return res.status(503).json({ error: 'Chưa đủ dữ liệu' });
+  const slice   = history.slice(-CFG.CANVAS_W);
+  const canvasA = slice.map(h => h.tong);
+  const pattern = scanPattern(canvasA);
+  const slope   = analyzeSlope(canvasA, 8);
+  const sr      = detectSR(canvasA, 2);
+  const dice    = analyzeDice(slice, 8);
+  const streak  = analyzeStreak(slice);
+  const ens     = ensembleVote({ pattern, slope, sr, dice, streak });
+  res.json({
+    id: '@sewdangcap',
+    ket_luan: ens ? { du_doan: fullLabel(ens.winner), do_tin_cay: `${ens.conf}%`, muc_do: ens.clarity,
+                      ty_le: ens.votePct } : null,
+    tin_hieu: {
+      chart_A_pattern: pattern
+        ? { ten: pattern.name, bias: fullLabel(pattern.bias), suc_manh: +pattern.strength.toFixed(2) }
+        : { ten: 'Không nhận diện', bias: null },
+      chart_A_slope: slope
+        ? { slope: slope.slope, lastVal: slope.last, projNext: slope.proj, bias: fullLabel(slope.slopeBias), chi_tiet: slope.detail }
+        : { chi_tiet: 'Không đủ dữ liệu' },
+      chart_A_sr: { bias: fullLabel(sr.srBias), chi_tiet: sr.srDetail, zones: sr.zones },
+      chart_B_dice: { bias: fullLabel(dice.diceBias), chi_tiet: dice.diceDetail, conv: `${dice.convScore}/3` },
+      streak_tam_ly: { bias: fullLabel(streak.streakBias), chi_tiet: streak.streakDetail,
+                       do_dai_cau: streak.streakLen, suc_manh: streak.strength },
+    },
+    nguon_bieu_quyet: ens?.sources ?? [],
+    trong_so: {
+      'Pattern':   CFG.W_PATTERN,
+      'Slope':     CFG.W_SLOPE,
+      'SR':        CFG.W_SR,
+      'Dice':      CFG.W_DICE,
+      'Streak':    CFG.W_STREAK,
+    },
+  });
+});
+
+// ════════════════════════════════════════════════════════════════
+//  /thongke — Win rate tracking
+// ════════════════════════════════════════════════════════════════
+app.get('/thongke', (req, res) => {
+  const slice = winLoss.slice(-50).reverse();
+  const wins  = slice.filter(r => r.win).length;
+  const rate  = slice.length ? Math.round(wins/slice.length*100) : 0;
+  let streak = 0, st = null;
+  for (const r of slice) { if (st===null){st=r.win;streak=1;} else if(r.win===st)streak++; else break; }
+  res.json({
+    id: '@sewdangcap',
+    tong_quan: {
+      tong_phien: slice.length,
+      thang: wins,
+      thua: slice.length - wins,
+      win_rate: `${rate}%`,
+      streak: streak > 0 ? `${streak} ${st?'THẮNG':'THUA'} liên tiếp` : 'Chưa có',
+    },
+    chi_tiet: slice.map((r, i) => ({
+      stt: i + 1,
+      phien: Number(r.phien),
+      du_doan: fullLabel(r.predicted),
+      ket_qua_thuc: fullLabel(r.actual),
+      do_tin_cay: `${r.conf}%`,
+      ket_luan: r.win ? '✅ THẮNG' : '❌ THUA',
+    })),
+  });
+});
+
+// ════════════════════════════════════════════════════════════════
+//  /history — Lịch sử phiên
+// ════════════════════════════════════════════════════════════════
+app.get('/history', (req, res) => {
+  const limit = Math.min(Number(req.query.limit) || 50, 500);
+  res.json({
+    id: '@sewdangcap',
+    tong: history.length,
+    data: history.slice(-limit).reverse().map(h => ({
+      phien: Number(h.phien),
+      xuc_xac: h.dice,
+      phan_loai: h.dice ? classifyDice(h.dice) : '-',
+      tong: h.tong,
+      ket_qua: fullLabel(h.kq),
+    })),
+  });
+});
+
+// ════════════════════════════════════════════════════════════════
+//  404
+// ════════════════════════════════════════════════════════════════
+app.use((req, res) => res.status(404).json({
+  error: 'Endpoint không tồn tại',
+  endpoints: ['/', '/sunlon', '/canvas', '/signals', '/thongke', '/history'],
+}));
+
+// ════════════════════════════════════════════════════════════════
+//  START
+// ════════════════════════════════════════════════════════════════
+app.listen(PORT, () => console.log(`
+╔═══════════════════════════════════════════════╗
+║  Virtual Chart Engine v4.0 — @sewdangcap     ║
+║  http://localhost:${PORT}                         ║
+╠═══════════════════════════════════════════════╣
+║  Canvas  : ${CFG.CANVAS_W} phiên / Min hist : ${CFG.MIN_HIST} phiên      ║
+║  Poll    : mỗi ${CFG.POLL_MS/1000}s                           ║
+║  Weights : Pat ${CFG.W_PATTERN} · Slp ${CFG.W_SLOPE} · SR ${CFG.W_SR} · Dice ${CFG.W_DICE} · Str ${CFG.W_STREAK} ║
+╠═══════════════════════════════════════════════╣
+║  /          → Dashboard HTML (game style)     ║
+║  /sunlon    → JSON dự đoán                    ║
+║  /canvas    → JSON biểu đồ                    ║
+║  /signals   → JSON 5 tín hiệu                 ║
+║  /thongke   → JSON winrate                    ║
+║  /history   → JSON lịch sử                    ║
+╚═══════════════════════════════════════════════╝
+`));
