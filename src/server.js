@@ -89,21 +89,15 @@ function stdDev(arr) {
 
 // ════════════════════════════════════════════════════════════════════
 //  ALGORITHM v8: SELF-BACKTESTING ENGINE
-//  Mỗi thuật toán tự đánh giá win rate trên lịch sử trước khi vote.
-//  Chỉ những thuật toán có win rate > MIN_WIN_RATE mới được vote.
 // ════════════════════════════════════════════════════════════════════
-const MIN_WIN_RATE = 0.52;  // ngưỡng tối thiểu để signal được tính
-const MIN_SAMPLE   = 8;     // số mẫu backtest tối thiểu
+const MIN_WIN_RATE = 0.52;
+const MIN_SAMPLE   = 8;
 
-// ── 1. MARKOV CHAIN với LAPLACE SMOOTHING ────────────────────────
-// Xây bảng xác suất P(next | state) cho state dài 1-4
-// Laplace smoothing tránh overfit khi sample nhỏ
 function buildMarkovTable(typeSeq, order) {
   const counts = {};
   for (let i = order; i < typeSeq.length; i++) {
-    // typeSeq[0] = newest → đọc ngược: oldest first
-    const key = typeSeq.slice(i - order, i).reverse().join(""); // oldest→newest
-    const next = typeSeq[i - order - 1]; // nhãn kết quả tiếp theo (về phía newer)
+    const key = typeSeq.slice(i - order, i).reverse().join("");
+    const next = typeSeq[i - order - 1];
     if (!next) continue;
     if (!counts[key]) counts[key] = { T: 0, X: 0 };
     counts[key][next]++;
@@ -114,14 +108,12 @@ function buildMarkovTable(typeSeq, order) {
 function predictMarkov(typeSeq, order) {
   if (typeSeq.length < order + MIN_SAMPLE) return null;
   const table = buildMarkovTable(typeSeq, order);
-  // state hiện tại = order phiên gần nhất (newest first → reverse)
   const curState = typeSeq.slice(0, order).reverse().join("");
   const c = table[curState];
   if (!c) return null;
-  const alpha = 0.5; // Laplace smoothing
+  const alpha = 0.5;
   const pT = (c.T + alpha) / (c.T + c.X + 2 * alpha);
   const pX = 1 - pT;
-  // Backtest: kiểm tra win rate thực của prediction này trong lịch sử
   let wins = 0, total = 0;
   for (let i = order + 1; i < typeSeq.length - 1; i++) {
     const state = typeSeq.slice(i, i + order).reverse().join("");
@@ -139,17 +131,13 @@ function predictMarkov(typeSeq, order) {
   if (wr < MIN_WIN_RATE) return null;
   const pred = pT >= pX ? "T" : "X";
   return {
-    signal: pred,
-    winRate: wr,
+    signal: pred, winRate: wr,
     conf: 0.50 + (wr - 0.50) * 1.2,
     detail: `Markov-${order} [${curState}] WR=${(wr*100).toFixed(0)}% (${total} mẫu)`,
-    source: `Markov-${order}`,
-    sampleCount: total
+    source: `Markov-${order}`, sampleCount: total
   };
 }
 
-// ── 2. PHÂN TÍCH CẦU BỆT (streak) ───────────────────────────────
-// Đo xem sau chuỗi N cùng loại thì kết quả tiếp theo thường là gì
 function analyzeStreakCau(typeSeq) {
   if (typeSeq.length < 10) return null;
   const cur = typeSeq[0];
@@ -159,11 +147,8 @@ function analyzeStreakCau(typeSeq) {
     else break;
   }
   if (streak < 2) return null;
-
-  // Backtest: tìm các lần xuất hiện chuỗi dài y hệt trong lịch sử
   let breakWins = 0, contWins = 0, total = 0;
   for (let i = streak + 1; i < typeSeq.length - 1; i++) {
-    // tìm chuỗi streak liên tiếp ending tại i
     if (typeSeq[i] !== cur) continue;
     let len = 0;
     for (let j = i; j < typeSeq.length; j++) {
@@ -179,7 +164,6 @@ function analyzeStreakCau(typeSeq) {
     total++;
   }
   if (total < MIN_SAMPLE) return null;
-
   const breakRate = breakWins / total;
   const contRate  = contWins  / total;
   if (breakRate > MIN_WIN_RATE) {
@@ -202,10 +186,8 @@ function analyzeStreakCau(typeSeq) {
   return null;
 }
 
-// ── 3. CẦU 1-1 XEN KẼ (alternating) ─────────────────────────────
 function analyzeAlternating(typeSeq) {
   if (typeSeq.length < 8) return null;
-  // Đo độ dài chuỗi xen kẽ hiện tại
   let altLen = 1;
   for (let i = 1; i < Math.min(typeSeq.length, 20); i++) {
     if (typeSeq[i] !== typeSeq[i-1]) altLen++;
@@ -213,11 +195,8 @@ function analyzeAlternating(typeSeq) {
   }
   if (altLen < 4) return null;
   const expected = typeSeq[0] === "T" ? "X" : "T";
-
-  // Backtest: sau chuỗi alt >= altLen thì tiếp tục hay không?
   let wins = 0, total = 0;
   for (let i = altLen + 1; i < typeSeq.length - 1; i++) {
-    // kiểm tra có chuỗi alt kết thúc tại i không
     let len = 0;
     for (let j = i; j < typeSeq.length - 1 && j < i + 30; j++) {
       if (typeSeq[j] !== typeSeq[j+1]) len++;
@@ -241,18 +220,15 @@ function analyzeAlternating(typeSeq) {
   };
 }
 
-// ── 4. CẦU ĐỐI XỨNG (block N-N) ─────────────────────────────────
 function analyzeSymmetric(typeSeq) {
   if (typeSeq.length < 12) return null;
   for (const bk of [2, 3, 4]) {
-    // Xác định vị trí trong block hiện tại
     const cur = typeSeq[0];
     let posInBlock = 0;
     for (let i = 0; i < typeSeq.length; i++) {
       if (typeSeq[i] === cur) posInBlock++;
       else break;
     }
-    // Xác nhận block trước đó
     let prevBlockLen = 0;
     let i = posInBlock;
     const prevType = typeSeq[i];
@@ -260,32 +236,25 @@ function analyzeSymmetric(typeSeq) {
       if (typeSeq[i] === prevType) prevBlockLen++;
       else break;
     }
-    if (prevBlockLen !== bk) continue; // block trước không đúng kích thước
-
+    if (prevBlockLen !== bk) continue;
     const predicted = posInBlock >= bk ? (cur === "T" ? "X" : "T") : cur;
-
-    // Backtest N-N pattern
     let wins = 0, total = 0;
     let idx = 0;
     while (idx < typeSeq.length - bk * 2 - 2) {
-      // Tìm block A dài bk
       const A = typeSeq[idx];
       let lenA = 0;
       let j = idx;
       for (; j < typeSeq.length && typeSeq[j] === A; j++) lenA++;
       if (lenA !== bk) { idx = j + 1; continue; }
-      // Block B sau A
       const B = typeSeq[j];
       if (B === A) { idx = j + 1; continue; }
       let lenB = 0;
       let k = j;
       for (; k < typeSeq.length && typeSeq[k] === B; k++) lenB++;
       if (lenB !== bk) { idx = k + 1; continue; }
-      // Phiên tiếp theo sau BB là gì?
-      const next = typeSeq[k - 1]; // về phía newer (index nhỏ hơn)
+      const next = typeSeq[k - 1];
       if (k - 1 >= 0) {
-        // Sau BB block thường tiếp tục B hay đổi về A?
-        const pred2 = A; // dự đoán quay về A (đối xứng)
+        const pred2 = A;
         if (next === pred2) wins++;
         total++;
       }
@@ -304,23 +273,11 @@ function analyzeSymmetric(typeSeq) {
   return null;
 }
 
-// ── 5. PHÂN TÍCH XÚC XẮC: cân bằng thống kê ────────────────────
-// Tổng xúc xắc tuân theo phân phối xác suất biết trước.
-// Nếu một số bị thiếu lâu, nó có xu hướng xuất hiện lại.
 function analyzeDiceBalance(hist) {
   if (hist.length < 20) return null;
   const recent = hist.slice(0, 30);
-  // Đếm tần suất từng tổng (3-18)
-  const freqActual = {};
-  for (let v = 3; v <= 18; v++) freqActual[v] = 0;
-  recent.forEach(h => freqActual[Math.round(h.tong)]++);
-
-  // Tỉ lệ lý thuyết của Tài (11-18) vs Xỉu (3-10): gần 50/50 (thực ra 105/111 cho 3xúc)
   const countT = recent.filter(h => h.type === "T").length;
-  const countX = recent.length - countT;
   const ratioT = countT / recent.length;
-
-  // Backtest: sau khi Tài chiếm > 60% trong 20 phiên, 20 phiên tiếp theo thường Xỉu nhiều hơn?
   let wins = 0, total = 0;
   for (let i = 20; i < hist.length - 20; i++) {
     const sub = hist.slice(i, i + 20);
@@ -339,7 +296,6 @@ function analyzeDiceBalance(hist) {
   if (total < MIN_SAMPLE) return null;
   const wr = wins / total;
   if (wr < MIN_WIN_RATE) return null;
-
   if (ratioT > 0.62) {
     return {
       signal: "X", winRate: wr,
@@ -359,7 +315,6 @@ function analyzeDiceBalance(hist) {
   return null;
 }
 
-// ── 6. PATTERN 5-MER (5-gram fingerprint) ───────────────────────
 function analyzePattern5(typeSeq) {
   if (typeSeq.length < 20) return null;
   const W = 5;
@@ -368,11 +323,8 @@ function analyzePattern5(typeSeq) {
   for (let i = W; i < typeSeq.length - 1; i++) {
     const pat = typeSeq.slice(i, i + W).join("");
     if (pat !== cur) continue;
-    const predicted = "T"; // placeholder, sẽ tính real distribution
-    const actual = typeSeq[i - 1];
-    // collect distribution
-    total++; // count hits
-    if (actual === "T") wins++;
+    total++;
+    if (typeSeq[i - 1] === "T") wins++;
   }
   if (total < MIN_SAMPLE) return null;
   const pT = wins / total;
@@ -388,19 +340,251 @@ function analyzePattern5(typeSeq) {
   };
 }
 
-// ── 7. BAYESIAN ENSEMBLE ─────────────────────────────────────────
-// Kết hợp các signal theo win rate thực tế (không phải trọng số cố định)
-// Log-odds aggregation: tránh vấn đề xác suất nhân nhau
+// ════════════════════════════════════════════════════════════════════
+//  ALGORITHM v9 ADDITION: CHART PATTERN RECOGNITION ENGINE
+//  Phân tích hình dạng đồ thị tổng xúc xắc, lưu khuôn mẫu, dự đoán
+// ════════════════════════════════════════════════════════════════════
+
+// Kho lưu trữ các khuôn mẫu đồ thị (in-memory, tích lũy theo thời gian)
+const chartPatternDB = {
+  templates: [],       // { shape, label, outcomes: {T:0, X:0}, id }
+  maxTemplates: 200,   // tối đa 200 khuôn mẫu
+  minMatchScore: 0.78, // ngưỡng tương đồng hình dạng tối thiểu
+};
+
+// Chuẩn hóa chuỗi tổng về dạng z-score để so sánh hình dạng
+function normalizeShape(arr) {
+  if (arr.length < 2) return arr;
+  const m = mean(arr);
+  const s = stdDev(arr) || 1;
+  return arr.map(v => (v - m) / s);
+}
+
+// Mô tả hình dạng đồ thị bằng các đặc trưng:
+// slope (xu hướng), curvature (độ cong), peaks/valleys
+function extractShapeFeatures(arr) {
+  const n = arr.length;
+  if (n < 5) return null;
+  const norm = normalizeShape(arr);
+
+  // Xu hướng tuyến tính (linear regression slope)
+  let sumX = 0, sumY = 0, sumXY = 0, sumX2 = 0;
+  for (let i = 0; i < n; i++) {
+    sumX += i; sumY += norm[i]; sumXY += i * norm[i]; sumX2 += i * i;
+  }
+  const slope = (n * sumXY - sumX * sumY) / (n * sumX2 - sumX * sumX);
+
+  // Độ cong trung bình (second derivative)
+  let curvature = 0;
+  for (let i = 1; i < n - 1; i++) {
+    curvature += norm[i+1] - 2*norm[i] + norm[i-1];
+  }
+  curvature /= (n - 2);
+
+  // Phát hiện đỉnh (peaks) và đáy (valleys)
+  let peaks = 0, valleys = 0;
+  for (let i = 1; i < n - 1; i++) {
+    if (norm[i] > norm[i-1] && norm[i] > norm[i+1]) peaks++;
+    if (norm[i] < norm[i-1] && norm[i] < norm[i+1]) valleys++;
+  }
+
+  // Momentum: nửa sau so với nửa đầu
+  const half = Math.floor(n/2);
+  const firstHalf = mean(norm.slice(0, half));
+  const secondHalf = mean(norm.slice(half));
+  const momentum = secondHalf - firstHalf;
+
+  // Biên độ dao động (volatility)
+  const volatility = stdDev(norm);
+
+  // Shape fingerprint: quantize các đặc trưng
+  const slopeQ  = slope  >  0.15 ? "UP"   : slope  < -0.15 ? "DOWN"  : "FLAT";
+  const curvQ   = curvature > 0.05 ? "CONV" : curvature < -0.05 ? "CONC" : "LIN";
+  const momQ    = momentum >  0.2  ? "ACC"  : momentum < -0.2  ? "DEC"  : "NEU";
+  const volQ    = volatility > 1.2 ? "HIGH" : volatility < 0.5 ? "LOW"  : "MID";
+  const peakQ   = peaks >= 3 ? "MULTI" : peaks === 2 ? "DOUBLE" : peaks === 1 ? "SINGLE" : "NONE";
+
+  return {
+    slope, curvature, momentum, volatility, peaks, valleys,
+    slopeQ, curvQ, momQ, volQ, peakQ,
+    fingerprint: `${slopeQ}|${curvQ}|${momQ}|${volQ}|${peakQ}`,
+    norm // giữ lại dạng chuẩn hóa để tính correlation
+  };
+}
+
+// Tính độ tương đồng giữa 2 chuỗi đã chuẩn hóa bằng Pearson correlation
+function pearsonCorrelation(a, b) {
+  const n = Math.min(a.length, b.length);
+  if (n < 3) return 0;
+  const ma = mean(a.slice(0, n)), mb = mean(b.slice(0, n));
+  let num = 0, da = 0, db = 0;
+  for (let i = 0; i < n; i++) {
+    const ai = a[i] - ma, bi = b[i] - mb;
+    num += ai * bi; da += ai*ai; db += bi*bi;
+  }
+  if (!da || !db) return 0;
+  return num / Math.sqrt(da * db);
+}
+
+// Phân loại hình dạng đồ thị theo tên gọi trực quan
+function classifyChartShape(features) {
+  const { slopeQ, curvQ, momQ, peakQ, volatility, peaks, valleys } = features;
+  if (volatility > 1.5 && peaks >= 3) return "Zigzag Mạnh";
+  if (slopeQ === "UP"   && curvQ === "CONV") return "Hình V ngược (Đỉnh)";
+  if (slopeQ === "DOWN" && curvQ === "CONC") return "Hình V (Đáy)";
+  if (slopeQ === "UP"   && momQ  === "ACC")  return "Tăng Tốc";
+  if (slopeQ === "DOWN" && momQ  === "DEC")  return "Giảm Tốc";
+  if (slopeQ === "FLAT" && volatility < 0.6) return "Nằm Ngang Ổn Định";
+  if (slopeQ === "FLAT" && volatility > 1.0) return "Dao Động Ngang";
+  if (peakQ === "DOUBLE" && slopeQ !== "DOWN") return "Hai Đỉnh";
+  if (valleys >= 2 && slopeQ !== "UP") return "Hai Đáy";
+  if (momQ === "ACC"  && slopeQ !== "DOWN") return "Tăng Momentum";
+  if (momQ === "DEC"  && slopeQ !== "UP")  return "Giảm Momentum";
+  return `Hỗn Hợp (${slopeQ}/${curvQ})`;
+}
+
+// Cập nhật kho khuôn mẫu với cửa sổ lịch sử mới
+function updateChartPatternDB(hist) {
+  if (hist.length < 16) return;
+  const WINDOW = 10; // cửa sổ 10 phiên để nhận dạng mẫu
+
+  for (let i = WINDOW + 1; i < Math.min(hist.length - 1, 100); i++) {
+    const window = hist.slice(i, i + WINDOW).map(h => h.tong).reverse();
+    const outcome = hist[i - 1].type; // kết quả ngay sau cửa sổ
+    const features = extractShapeFeatures(window);
+    if (!features) continue;
+
+    // Tìm khuôn mẫu tương tự trong DB
+    let bestMatch = null, bestScore = 0;
+    for (const tmpl of chartPatternDB.templates) {
+      if (tmpl.norm.length !== features.norm.length) continue;
+      const score = pearsonCorrelation(tmpl.norm, features.norm);
+      if (score > bestScore) { bestScore = score; bestMatch = tmpl; }
+    }
+
+    if (bestScore >= chartPatternDB.minMatchScore && bestMatch) {
+      // Cập nhật khuôn mẫu hiện có
+      bestMatch.outcomes[outcome]++;
+      bestMatch.totalSeen++;
+    } else {
+      // Tạo khuôn mẫu mới
+      const label = classifyChartShape(features);
+      chartPatternDB.templates.push({
+        id: chartPatternDB.templates.length + 1,
+        shape: features.fingerprint,
+        label,
+        features,
+        norm: features.norm,
+        window: [...window],
+        outcomes: { T: outcome === "T" ? 1 : 0, X: outcome === "X" ? 1 : 0 },
+        totalSeen: 1,
+        createdAt: Date.now()
+      });
+      // Giới hạn kích thước DB
+      if (chartPatternDB.templates.length > chartPatternDB.maxTemplates) {
+        // Xóa khuôn mẫu ít gặp nhất
+        chartPatternDB.templates.sort((a,b) => b.totalSeen - a.totalSeen);
+        chartPatternDB.templates = chartPatternDB.templates.slice(0, chartPatternDB.maxTemplates);
+      }
+    }
+  }
+}
+
+// Dự đoán dựa trên khuôn mẫu đồ thị hiện tại
+function predictChartPattern(hist) {
+  if (hist.length < 12) return null;
+  const WINDOW = 10;
+  const currentWindow = hist.slice(0, WINDOW).map(h => h.tong).reverse();
+  const features = extractShapeFeatures(currentWindow);
+  if (!features) return null;
+
+  // Cập nhật DB trước
+  updateChartPatternDB(hist);
+
+  // Tìm các khuôn mẫu phù hợp nhất
+  const matches = [];
+  for (const tmpl of chartPatternDB.templates) {
+    if (tmpl.norm.length !== features.norm.length) continue;
+    const score = pearsonCorrelation(tmpl.norm, features.norm);
+    if (score >= chartPatternDB.minMatchScore) {
+      const total = tmpl.outcomes.T + tmpl.outcomes.X;
+      if (total >= 3) {
+        matches.push({ ...tmpl, score, total });
+      }
+    }
+  }
+
+  if (!matches.length) return null;
+  // Tổng hợp vote có trọng số theo score và totalSeen
+  let wT = 0, wX = 0;
+  for (const m of matches) {
+    const w = m.score * Math.log(1 + m.totalSeen);
+    const pT = m.outcomes.T / m.total;
+    wT += w * pT;
+    wX += w * (1 - pT);
+  }
+
+  if (wT + wX < 0.001) return null;
+  const pT = wT / (wT + wX);
+  const pred = pT >= 0.5 ? "T" : "X";
+  const wr = Math.max(pT, 1 - pT);
+  if (wr < MIN_WIN_RATE) return null;
+
+  const shapeName = classifyChartShape(features);
+  const topMatch = matches.sort((a,b) => b.score - a.score)[0];
+
+  return {
+    signal: pred, winRate: wr,
+    conf: 0.50 + (wr - 0.50) * 1.2,
+    detail: `Đồ thị [${shapeName}] khớp ${matches.length} mẫu (best ${(topMatch.score*100).toFixed(0)}%) → ${pred==="T"?"Tài":"Xỉu"} WR=${(wr*100).toFixed(0)}%`,
+    source: "Chart Pattern",
+    sampleCount: matches.reduce((s, m) => s + m.totalSeen, 0),
+    shapeName,
+    matchCount: matches.length,
+    features,
+    topMatchLabel: topMatch.label
+  };
+}
+
+// Thống kê kho khuôn mẫu
+function getPatternDBStats() {
+  const total = chartPatternDB.templates.length;
+  if (!total) return { total: 0, shapes: [], topPatterns: [] };
+
+  const shapeCounts = {};
+  chartPatternDB.templates.forEach(t => {
+    shapeCounts[t.label] = (shapeCounts[t.label] || 0) + t.totalSeen;
+  });
+
+  const topPatterns = chartPatternDB.templates
+    .filter(t => t.totalSeen >= 3)
+    .sort((a, b) => b.totalSeen - a.totalSeen)
+    .slice(0, 10)
+    .map(t => {
+      const tot = t.outcomes.T + t.outcomes.X;
+      const wrT = tot > 0 ? t.outcomes.T / tot : 0.5;
+      return {
+        id: t.id, label: t.label, shape: t.shape,
+        totalSeen: t.totalSeen,
+        winRateT: wrT, winRateX: 1 - wrT,
+        predictedNext: wrT >= 0.5 ? "T" : "X"
+      };
+    });
+
+  return { total, shapeCounts, topPatterns };
+}
+
+// ════════════════════════════════════════════════════════════════════
+//  BAYESIAN ENSEMBLE + CALIBRATION
+// ════════════════════════════════════════════════════════════════════
 function bayesianEnsemble(signals) {
   if (!signals.length) return { pred: "?", prob: 0.50, logOdds: 0 };
-  // Prior: 50/50
   let logOdds = 0;
   for (const s of signals) {
-    const wr = Math.min(Math.max(s.winRate, 0.50), 0.85); // clamp
+    const wr = Math.min(Math.max(s.winRate, 0.50), 0.85);
     const lr = s.signal === "T"
       ? Math.log(wr / (1 - wr))
       : Math.log((1-wr) / wr);
-    // Weight theo sample count (nhiều mẫu = tin hơn)
     const weight = Math.log(1 + s.sampleCount / 10);
     logOdds += lr * weight;
   }
@@ -412,21 +596,15 @@ function bayesianEnsemble(signals) {
   };
 }
 
-// ── 8. CALIBRATED CONFIDENCE ─────────────────────────────────────
-// Compress confidence vào range thực tế [0.50, 0.78]
-// Tránh việc hiển thị 95% khi thực tế chỉ đúng 58%
 function calibrateConf(rawProb) {
-  // Platt scaling-inspired: map logit space về range thực
   const clipped = Math.min(Math.max(rawProb, 0.50), 0.95);
-  return 0.50 + (clipped - 0.50) * 0.65; // tối đa ~79%
+  return 0.50 + (clipped - 0.50) * 0.65;
 }
 
-// ── BACKTEST ENGINE: đo win rate tổng của predictor ─────────────
 function backtestPredictor(hist, windowSize = 30) {
   if (hist.length < windowSize + 10) return null;
   let wins = 0, total = 0;
   for (let i = 1; i <= Math.min(30, hist.length - windowSize - 1); i++) {
-    // Dùng hist[i..i+windowSize] để dự đoán hist[i-1]
     const subHist = hist.slice(i, i + windowSize);
     if (subHist.length < 10) continue;
     const subSeq = subHist.map(h => h.type);
@@ -441,36 +619,29 @@ function backtestPredictor(hist, windowSize = 30) {
   return { wins, total, wr: wins / total };
 }
 
-// ── COLLECT ALL SIGNALS ──────────────────────────────────────────
 function collectSignals(typeSeq, hist) {
   const signals = [];
   const add = (r) => { if (r) signals.push(r); };
-
-  // Markov chains bậc 1, 2, 3
   add(predictMarkov(typeSeq, 1));
   add(predictMarkov(typeSeq, 2));
   add(predictMarkov(typeSeq, 3));
-
-  // Cầu patterns
   add(analyzeStreakCau(typeSeq));
   add(analyzeAlternating(typeSeq));
   add(analyzeSymmetric(typeSeq));
   add(analyzePattern5(typeSeq));
-
-  // Dice balance
   if (hist) add(analyzeDiceBalance(hist));
-
+  if (hist) add(predictChartPattern(hist));
   return signals;
 }
 
 // ════════════════════════════════════════════════════════════════════
-//  MAIN PREDICTOR v8
+//  MAIN PREDICTOR v9
 // ════════════════════════════════════════════════════════════════════
-function predictV8(hist) {
+function predictV9(hist) {
   if (hist.length < 10) {
     return {
       next: "?", nextDisplay: "Chưa đủ dữ liệu", conf: 50, confDisplay: "50%",
-      signals: [], backtest: null, typeSeq: []
+      signals: [], backtest: null, typeSeq: [], patternDBStats: getPatternDBStats()
     };
   }
 
@@ -480,13 +651,14 @@ function predictV8(hist) {
   const conf = calibrateConf(prob);
   const backtest = backtestPredictor(hist, 30);
 
-  // Cầu summary
   const curType = typeSeq[0];
   let streak = 0;
   for (const t of typeSeq) { if (t === curType) streak++; else break; }
 
-  // Pattern display (20 phiên gần nhất)
   const pattern20 = typeSeq.slice(0, 20).join("");
+
+  // Chart pattern riêng
+  const chartSig = signals.find(s => s.source === "Chart Pattern");
 
   return {
     next: pred === "?" ? "?" : pred,
@@ -503,16 +675,17 @@ function predictV8(hist) {
       d2: hist.slice(0, 25).map(h => h.dice[1]),
       d3: hist.slice(0, 25).map(h => h.dice[2]),
     },
-    streak,
-    curType,
-    pattern20,
+    streak, curType, pattern20,
     votesT: signals.filter(s => s.signal === "T").reduce((s, r) => s + r.winRate, 0).toFixed(2),
     votesX: signals.filter(s => s.signal === "X").reduce((s, r) => s + r.winRate, 0).toFixed(2),
+    patternDBStats: getPatternDBStats(),
+    chartSignal: chartSig || null,
+    currentShape: chartSig ? chartSig.shapeName : null,
   };
 }
 
 // ════════════════════════════════════════════════════════════════════
-//  HTML BUILDER v8
+//  HTML BUILDER v9
 // ════════════════════════════════════════════════════════════════════
 function buildHTML(pred, h) {
   if (!pred || pred.next === "?") return "<h2>Không đủ dữ liệu</h2>";
@@ -534,7 +707,8 @@ function buildHTML(pred, h) {
 
   const sigRows = pred.signals.map(s => {
     const isSigT = s.signal === "T";
-    return `<tr>
+    const isChart = s.source === "Chart Pattern";
+    return `<tr${isChart ? ' style="background:rgba(100,200,150,0.06)"' : ''}>
       <td class="src-td">${s.source}</td>
       <td class="${isSigT ? "sig-t" : "sig-x"}">${isSigT ? "▲ Tài" : "▼ Xỉu"}</td>
       <td class="wr-td">${(s.winRate * 100).toFixed(0)}%</td>
@@ -548,19 +722,42 @@ function buildHTML(pred, h) {
     : 50;
   const pctX = 100 - pctT;
 
-  // Bollinger
   const sumArr = pred.sumChart;
   const bolMid = parseFloat(mean(sumArr).toFixed(2));
   const bolSd  = parseFloat(stdDev(sumArr).toFixed(2));
   const bolUp  = parseFloat((bolMid + 2 * bolSd).toFixed(2));
   const bolLow = parseFloat((bolMid - 2 * bolSd).toFixed(2));
 
+  // Pattern DB stats
+  const db = pred.patternDBStats;
+  const topPatternsHTML = db.topPatterns.length > 0
+    ? db.topPatterns.map(p => {
+        const wrPct = Math.max(p.winRateT, p.winRateX) * 100;
+        const isTp = p.predictedNext === "T";
+        return `<tr>
+          <td class="src-td">#${p.id}</td>
+          <td style="color:#9a8060;font-size:.62rem;max-width:120px">${p.label}</td>
+          <td class="${isTp?'sig-t':'sig-x'}">${isTp?"▲ T":"▼ X"}</td>
+          <td class="wr-td">${wrPct.toFixed(0)}%</td>
+          <td class="n-td">${p.totalSeen}</td>
+        </tr>`;
+      }).join("")
+    : `<tr><td colspan="5" style="color:#555;font-size:.75rem;padding:6px">Đang xây dựng kho mẫu...</td></tr>`;
+
+  const shapeInfoHTML = pred.chartSignal
+    ? `<div class="shape-badge">
+        <span class="shape-icon">📊</span>
+        <span>Hình dạng hiện tại: <strong style="color:#88eebb">${pred.chartSignal.shapeName}</strong></span>
+        <span class="shape-match">Khớp ${pred.chartSignal.matchCount} mẫu lịch sử</span>
+      </div>`
+    : `<div class="shape-badge" style="opacity:0.5">📊 Đang phân tích hình dạng đồ thị...</div>`;
+
   return `<!DOCTYPE html>
 <html lang="vi">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>SOI CẦU v8 — SUNWIN</title>
+<title>SOI CẦU v9 — SUNWIN</title>
 <link href="https://fonts.googleapis.com/css2?family=Rajdhani:wght@400;600;700&family=Share+Tech+Mono&display=swap" rel="stylesheet">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"><\/script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/chartjs-plugin-annotation/3.0.1/chartjs-plugin-annotation.min.js"><\/script>
@@ -571,6 +768,7 @@ function buildHTML(pred, h) {
   --bg:#0d0900;--bg2:#160e03;--bg3:#1e1404;--border:rgba(180,130,10,0.28);
   --text:#e8d8a0;--text-dim:#9a7a40;
   --mono:'Share Tech Mono',monospace;--head:'Rajdhani',sans-serif;
+  --chart-green:#44cc88;
 }
 body{background:var(--bg);min-height:100vh;color:var(--text);font-family:var(--head);padding:10px;}
 .hdr{display:flex;align-items:center;justify-content:space-between;
@@ -626,12 +824,25 @@ body{background:var(--bg);min-height:100vh;color:var(--text);font-family:var(--h
 .detail-td{color:#7a6040;font-size:.63rem;line-height:1.3;}
 .algo-note{background:rgba(100,200,100,0.05);border:1px solid rgba(100,200,100,0.15);border-radius:8px;
   padding:8px 12px;margin-bottom:10px;font-size:.70rem;color:#80bb80;line-height:1.6;}
-@media(max-width:620px){.metrics-row{grid-template-columns:repeat(3,1fr)}.pred-row{grid-template-columns:1fr}}
+/* Chart Pattern DB styles */
+.pattern-db{background:var(--bg2);border:1px solid rgba(100,200,150,0.25);border-radius:10px;padding:12px;margin-bottom:10px;}
+.pattern-db-title{font-size:.64rem;text-transform:uppercase;letter-spacing:1.5px;color:#60bb90;margin-bottom:10px;display:flex;align-items:center;gap:8px;justify-content:space-between;}
+.db-stats{display:flex;gap:12px;font-family:var(--mono);font-size:.72rem;}
+.db-stat{background:rgba(100,200,150,0.08);border:1px solid rgba(100,200,150,0.18);border-radius:5px;padding:4px 10px;}
+.db-stat .v{color:#66ddaa;font-weight:bold;}
+.shape-badge{display:flex;align-items:center;gap:10px;background:rgba(100,200,150,0.08);
+  border:1px solid rgba(100,200,150,0.20);border-radius:8px;padding:8px 12px;margin-bottom:10px;
+  font-size:.72rem;color:#90cca8;}
+.shape-icon{font-size:1.2rem;}
+.shape-match{font-family:var(--mono);font-size:.65rem;color:#50aa70;margin-left:auto;}
+.two-col{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:10px;}
+.chart-canvas-wrap{position:relative;}
+@media(max-width:620px){.metrics-row{grid-template-columns:repeat(3,1fr)}.pred-row{grid-template-columns:1fr}.two-col{grid-template-columns:1fr}}
 </style>
 </head>
 <body>
 <div class="hdr">
-  <div class="hdr-title">⬦ SOI CẦU v8 — SUNWIN ⬦</div>
+  <div class="hdr-title">⬦ SOI CẦU v9 — SUNWIN ⬦</div>
   <div class="hdr-badge">
     <span>Phiên <span class="val">#${h.phien}</span></span>
     <span class="${h.type==='T'?'type-t':'type-x'} val">${h.type==='T'?'Tài':'Xỉu'}</span>
@@ -642,11 +853,12 @@ body{background:var(--bg);min-height:100vh;color:var(--text);font-family:var(--h
 </div>
 
 <div class="algo-note">
-  ⚡ <strong>v8 — Self-Backtesting Engine:</strong> Mỗi signal chỉ được kích hoạt nếu win rate thực &gt; 52% trên dữ liệu lịch sử.
-  Hiện có <strong>${pred.signalCount}</strong> signal hợp lệ.
-  Backtest 30 phiên gần nhất: <strong style="color:#aaffaa">${btWR}%</strong> (${btTotal} lần kiểm tra).
-  Confidence được hiệu chỉnh (calibrated) — không phóng đại.
+  ⚡ <strong>v9 — Chart Pattern Recognition:</strong> Tự động trích xuất hình dạng đồ thị, lưu thành khuôn mẫu, so khớp với lịch sử.
+  Hiện có <strong>${pred.signalCount}</strong> signal hợp lệ · Kho mẫu: <strong style="color:#88ddaa">${db.total}</strong> mẫu.
+  Backtest 30 phiên: <strong style="color:#aaffaa">${btWR}%</strong>.
 </div>
+
+${shapeInfoHTML}
 
 <div class="metrics-row">
   <div class="metric-card" style="--accent:${predColor}">
@@ -669,10 +881,10 @@ body{background:var(--bg);min-height:100vh;color:var(--text);font-family:var(--h
     <div class="metric-val">${pred.streak}</div>
     <div class="metric-sub">${pred.curType==='T'?'Tài':'Xỉu'} liên tiếp</div>
   </div>
-  <div class="metric-card" style="--accent:#44ff88">
-    <div class="metric-label">Tổng Hiện Tại</div>
-    <div class="metric-val">${h.tong}</div>
-    <div class="metric-sub">${h.dice.join('·')}</div>
+  <div class="metric-card" style="--accent:var(--chart-green)">
+    <div class="metric-label">Khuôn Mẫu</div>
+    <div class="metric-val">${db.total}</div>
+    <div class="metric-sub">mẫu đồ thị</div>
   </div>
 </div>
 
@@ -695,9 +907,31 @@ body{background:var(--bg);min-height:100vh;color:var(--text);font-family:var(--h
   </div>
 </div>
 
-<div class="chart-wrap">
-  <div class="chart-title">📈 Biểu Đồ Tổng + Bollinger Band</div>
-  <canvas id="sumChart" height="200"></canvas>
+<div class="two-col">
+  <div class="chart-wrap" style="margin-bottom:0">
+    <div class="chart-title">📈 Biểu Đồ Tổng + Bollinger Band</div>
+    <canvas id="sumChart" height="220"></canvas>
+  </div>
+  <div class="chart-wrap" style="margin-bottom:0">
+    <div class="chart-title">📊 Hình Dạng Đồ Thị (Chuẩn Hóa)</div>
+    <canvas id="shapeChart" height="220"></canvas>
+  </div>
+</div>
+
+<div class="pattern-db" style="margin-top:10px">
+  <div class="pattern-db-title">
+    <span>🗂 Kho Khuôn Mẫu Đồ Thị</span>
+    <div class="db-stats">
+      <div class="db-stat">Tổng: <span class="v">${db.total}</span></div>
+      <div class="db-stat">Hình dạng: <span class="v">${Object.keys(db.shapeCounts||{}).length}</span></div>
+    </div>
+  </div>
+  <div style="overflow-x:auto">
+  <table class="sig-table">
+    <thead><tr><th>#</th><th>Tên Mẫu</th><th>Dự Đoán</th><th>WR%</th><th>Lần Gặp</th></tr></thead>
+    <tbody>${topPatternsHTML}</tbody>
+  </table>
+  </div>
 </div>
 
 <div class="pred-row">
@@ -726,9 +960,6 @@ body{background:var(--bg);min-height:100vh;color:var(--text);font-family:var(--h
 Chart.register(window['chartjs-plugin-annotation']);
 const LABELS   = ${labels};
 const SUM_DATA = ${sumData};
-const D1_DATA  = ${d1Data};
-const D2_DATA  = ${d2Data};
-const D3_DATA  = ${d3Data};
 const TYPE_DATA = ${typeData};
 const N = SUM_DATA.length;
 const BOLL_UP  = ${bolUp};
@@ -827,6 +1058,62 @@ new Chart(document.getElementById('sumChart').getContext('2d'), {
   }
 });
 
+// Shape Chart: hiển thị chuỗi chuẩn hóa 10 phiên gần nhất
+(function() {
+  const raw = SUM_DATA.slice(-10);
+  if (raw.length < 2) return;
+  const m = raw.reduce((s,v)=>s+v,0)/raw.length;
+  const sd = Math.sqrt(raw.reduce((s,v)=>s+(v-m)**2,0)/raw.length) || 1;
+  const norm = raw.map(v => (v - m) / sd);
+  const shapeLabels = raw.map((_,i) => String(i+1));
+
+  new Chart(document.getElementById('shapeChart').getContext('2d'), {
+    type: 'line',
+    data: {
+      labels: shapeLabels,
+      datasets: [{
+        label: 'Hình Dạng (Z-score)',
+        data: norm,
+        borderColor: 'rgba(100,220,150,0.85)',
+        borderWidth: 2.5,
+        pointRadius: norm.map((v,i) => i === norm.length-1 ? 8 : 5),
+        pointBackgroundColor: norm.map((v,i) => {
+          if (i === norm.length-1) return '#44ff88';
+          return v >= 0 ? 'rgba(245,200,66,0.8)' : 'rgba(160,112,255,0.8)';
+        }),
+        pointBorderColor: '#333',
+        pointBorderWidth: 1,
+        tension: 0.35,
+        fill: { target: 'origin', above: 'rgba(245,200,66,0.07)', below: 'rgba(160,112,255,0.07)' }
+      }]
+    },
+    options: {
+      responsive:true, animation:{duration:600},
+      layout:{padding:{top:12,bottom:6}},
+      scales: {
+        y: { ticks:{color:'#6a8a70',font:{size:10,family:'Share Tech Mono'}},
+             grid:{color:'rgba(100,200,120,0.10)'},
+             title:{display:true,text:'Z-score',color:'#507050',font:{size:10}} },
+        x: { ticks:{color:'#507050',font:{size:10,family:'Share Tech Mono'}},
+             grid:{color:'rgba(100,200,120,0.06)'},
+             title:{display:true,text:'Phiên (cũ→mới)',color:'#507050',font:{size:10}} }
+      },
+      plugins:{
+        legend:{display:false},
+        annotation:{annotations:{
+          zero:{type:'line',scaleID:'y',value:0,borderColor:'rgba(255,255,255,0.15)',borderWidth:1,borderDash:[4,4]},
+          pos1:{type:'line',scaleID:'y',value:1,borderColor:'rgba(245,200,66,0.20)',borderWidth:1,borderDash:[2,4]},
+          neg1:{type:'line',scaleID:'y',value:-1,borderColor:'rgba(160,112,255,0.20)',borderWidth:1,borderDash:[2,4]},
+        }},
+        tooltip:{
+          backgroundColor:'rgba(10,20,12,0.95)',
+          callbacks:{label:ctx=>{ const v=ctx.parsed.y; return 'Z: '+(v>=0?'+':'')+v.toFixed(2)+' ('+(v>=0?'Tài':'Xỉu')+')'; }}
+        }
+      }
+    }
+  });
+})();
+
 setTimeout(() => location.reload(), 12000);
 <\/script>
 </body>
@@ -844,21 +1131,24 @@ http.createServer(async (req, res) => {
   if (url.pathname === "/bando") {
     if (!history.length) { res.writeHead(503,{"Content-Type":"text/plain;charset=utf-8"}); res.end("Chưa có dữ liệu"); return; }
     const h = history[0];
-    const pred = predictV8(history);
+    const pred = predictV9(history);
     res.writeHead(200, {"Content-Type":"text/html;charset=utf-8"});
     res.end(buildHTML(pred, h)); return;
   }
 
   if (url.pathname === "/sunlon") {
     if (!history.length) { res.writeHead(503,{"Content-Type":"application/json"}); res.end(JSON.stringify({loi:"Chưa có dữ liệu"})); return; }
-    const h = history[0], pred = predictV8(history);
+    const h = history[0], pred = predictV9(history);
     const pattern = history.slice(0,20).map(x=>x.type).reverse().join("");
     res.writeHead(200,{"Content-Type":"application/json","Access-Control-Allow-Origin":"*"});
     res.end(JSON.stringify({
       phien: h.phien, xuc_xac: h.dice, ket_qua: h.type==="T"?"Tài":"Xỉu",
       phien_hien_tai: String(Number(h.phien)+1), du_doan: pred.nextDisplay,
       do_tin_cay: pred.confDisplay, backtest_wr: pred.backtest?.wr ?? null,
-      signal_count: pred.signalCount, pattern, ver: "v8"
+      signal_count: pred.signalCount, pattern,
+      current_shape: pred.currentShape,
+      pattern_db_size: pred.patternDBStats.total,
+      ver: "v9"
     })); return;
   }
 
@@ -867,26 +1157,37 @@ http.createServer(async (req, res) => {
 
   if (url.pathname === "/" || url.pathname === "/predict") {
     if (!history.length) { res.writeHead(503); res.end(JSON.stringify({loi:"Chưa có dữ liệu"})); return; }
-    const h = history[0], pred = predictV8(history);
+    const h = history[0], pred = predictV9(history);
     res.writeHead(200);
     res.end(JSON.stringify({
       phien_hien_tai: h.phien, xuc_xac: h.dice, tong_hien_tai: h.tong,
       ket_qua_hien: h.type==="T"?"Tài":"Xỉu", phien_du_doan: String(Number(h.phien)+1),
       du_doan: pred.nextDisplay, do_tin_cay: pred.confDisplay,
       backtest_winrate: pred.backtest?.wr ?? null,
-      signal_count: pred.signalCount, ver: "v8"
+      signal_count: pred.signalCount,
+      current_shape: pred.currentShape,
+      pattern_db_size: pred.patternDBStats.total,
+      ver: "v9"
     })); return;
   }
 
   if (url.pathname === "/predict/detail") {
     if (!history.length) { res.writeHead(503); res.end(JSON.stringify({loi:"Chưa có dữ liệu"})); return; }
-    const pred = predictV8(history);
+    const pred = predictV9(history);
     res.writeHead(200);
     res.end(JSON.stringify({
       du_doan: pred.nextDisplay, do_tin_cay: pred.confDisplay,
       backtest: pred.backtest, signals: pred.signals,
-      pattern20: pred.pattern20, streak: pred.streak, ver: "v8"
+      pattern20: pred.pattern20, streak: pred.streak,
+      chart_signal: pred.chartSignal,
+      pattern_db: pred.patternDBStats,
+      ver: "v9"
     })); return;
+  }
+
+  if (url.pathname === "/patterns") {
+    res.writeHead(200);
+    res.end(JSON.stringify(getPatternDBStats(), null, 2)); return;
   }
 
   if (url.pathname === "/history") {
@@ -904,13 +1205,18 @@ http.createServer(async (req, res) => {
   }
 
   res.writeHead(404);
-  res.end(JSON.stringify({loi:"Không tìm thấy", endpoints:["/predict","/predict/detail","/history","/bando","/sunlon","/debug"], ver:"v8"}));
+  res.end(JSON.stringify({
+    loi:"Không tìm thấy",
+    endpoints:["/predict","/predict/detail","/history","/bando","/sunlon","/patterns","/debug"],
+    ver:"v9"
+  }));
 
 }).listen(PORT, () => {
-  console.log("✅  SicBo v8.0 — Self-Backtesting Engine — port " + PORT);
+  console.log("✅  SicBo v9.0 — Chart Pattern Recognition Engine — port " + PORT);
   console.log("    Dashboard : http://localhost:" + PORT + "/bando");
-  console.log("    Algorithms: Markov(1/2/3) · Cầu Bệt · Cầu 1-1 · Cầu N-N · 5-gram · Dice Balance");
-  console.log("    All signals validated by backtest (WR > 52% required)");
+  console.log("    Patterns  : http://localhost:" + PORT + "/patterns");
+  console.log("    Algorithms: Markov(1/2/3) · Cầu Bệt · Cầu 1-1 · Cầu N-N · 5-gram · Dice Balance · Chart Pattern");
+  console.log("    Chart Pattern: Z-score normalization · Pearson correlation · Shape fingerprinting");
   syncHistory();
   setInterval(syncHistory, 12000);
 });
