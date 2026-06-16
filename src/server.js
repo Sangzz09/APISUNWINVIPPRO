@@ -108,334 +108,181 @@ function normalize(arr) {
 
 // ═══════════════════════════════════════════════
 //  SIGNAL INTERFACE
-//  signal: "T" | "X"
-//  winRate: tỷ lệ thắng thực tế trên lịch sử [0..1]
-//  sampleCount: số mẫu backtest
-//  source: tên thuật toán
-//  detail: mô tả chi tiết
 // ═══════════════════════════════════════════════
 const MIN_WIN_RATE = 0.52;
 const MIN_SAMPLES  = 8;
 
 // ═══════════════════════════════════════════════
 //  THUẬT TOÁN 1: MARKOV CHAIN
-//  Ý tưởng: Dựa vào trạng thái hiện tại (chuỗi order phiên gần nhất)
-//  để dự đoán phiên tiếp theo.
-//
-//  Cấu trúc dữ liệu: history[0] = mới nhất, history[N-1] = cũ nhất
-//  seq[0] = kết quả phiên mới nhất
-//
-//  Để xây bảng Markov:
-//    Với mỗi vị trí i (0-indexed, mới→cũ):
-//      state = seq[i..i+order-1] (i=0 là mới nhất)
-//      outcome = seq[i+order] = kết quả phiên TRƯỚC state đó (cũ hơn 1 bước)
-//    => Tức là: biết "order phiên vừa xong", dự đoán "phiên tiếp theo"
-//    Nhưng history đang sắp xếp mới→cũ, nên "phiên tiếp theo" (trong tương lai)
-//    tương ứng với index nhỏ hơn.
-//
-//  Dự đoán phiên tiếp theo:
-//    state hiện tại = seq[0..order-1]
-//    tra bảng → kết quả phổ biến nhất
-//
-//  Backtest tại vị trí i (i >= order):
-//    state = seq[i..i+order-1]
-//    thực tế kết quả tiếp theo (phiên mới hơn) = seq[i-1]  (vì i-1 < i)
 // ═══════════════════════════════════════════════
 function markov(seq, order) {
-  // seq: mảng "T"/"X", seq[0]=mới nhất
-  // Cần ít nhất: order (state) + 1 (outcome) + MIN_SAMPLES (backtest)
   if (seq.length < order + 1 + MIN_SAMPLES) return null;
-
-  // Xây bảng: key = state string (order ký tự, chiều mới→cũ), value = {T,X}
   const table = {};
-  // Duyệt từ i = order đến length-1
-  // state = seq[i-order .. i-1] (chỉ số i-order = cũ hơn, i-1 = gần hơn)
-  // => state string đọc theo chiều mới→cũ: seq[i-1], seq[i-2], ..., seq[i-order]
-  // outcome = seq[i-order-1] = phiên mới hơn state, chính là kết quả "tiếp theo"
-  //           NHƯNG vì seq sắp mới→cũ, phiên mới hơn = index NHỎ hơn
-  //           => Khi state bắt đầu tại position (i-order), kết quả tiếp theo = seq[i-order-1]
-  // Tổng quát hơn: hãy đặt lại: state tại start position p (mới→cũ, p=0 là mới nhất)
-  //   state = seq[p..p+order-1]
-  //   outcome = seq[p-1] ← phiên mới hơn (nếu p > 0)
-  // Vậy duyệt p từ 1 đến length-order:
-
   for (let p = 1; p <= seq.length - order; p++) {
     const stateKey = seq.slice(p, p + order).join("");
-    const outcome  = seq[p - 1]; // phiên tiếp theo (mới hơn)
+    const outcome  = seq[p - 1];
     if (!table[stateKey]) table[stateKey] = { T: 0, X: 0 };
     table[stateKey][outcome]++;
   }
-
-  // State hiện tại: seq[0..order-1]
   const curState = seq.slice(0, order).join("");
   const c = table[curState];
   if (!c || (c.T + c.X) === 0) return null;
-
   const signal = c.T >= c.X ? "T" : "X";
-
-  // Backtest: với mỗi p từ 1..length-order, kiểm tra dự đoán có đúng không
   let wins = 0, total = 0;
   for (let p = 1; p <= seq.length - order - 1; p++) {
-    // Bỏ qua state hiện tại (p=0)
     const st = seq.slice(p, p + order).join("");
     if (st !== curState) continue;
-    // Dự đoán dựa trên bảng (loại trừ chính phiên này khỏi bảng? Không cần với N đủ lớn)
-    // Kết quả dự đoán theo bảng tại thời điểm p:
     const tb = table[st];
     const pred = (tb.T >= tb.X) ? "T" : "X";
     const actual = seq[p - 1];
     if (pred === actual) wins++;
     total++;
   }
-
   if (total < MIN_SAMPLES) return null;
   const wr = wins / total;
   if (wr < MIN_WIN_RATE) return null;
-
   return {
-    signal,
-    winRate: wr,
-    sampleCount: total,
+    signal, winRate: wr, sampleCount: total,
     source: `Markov-${order}`,
     detail: `State [${curState}] → ${signal==="T"?"Tài":"Xỉu"} WR=${(wr*100).toFixed(0)}% (${total} mẫu)`
   };
 }
 
 // ═══════════════════════════════════════════════
-//  THUẬT TOÁN 2: CẦU BỆT (Streak Analysis)
-//  Ý tưởng: Sau k phiên liên tiếp cùng loại, phiên tiếp theo là gì?
-//  Backtest đúng: đếm bao nhiêu lần sau k-bệt thì đảo, bao nhiêu lần tiếp
+//  THUẬT TOÁN 2: CẦU BỆT
 // ═══════════════════════════════════════════════
 function streakCau(seq) {
   if (seq.length < MIN_SAMPLES + 3) return null;
-
-  // Đo streak hiện tại
   const curType = seq[0];
   let curStreak = 0;
   for (let i = 0; i < seq.length; i++) {
     if (seq[i] === curType) curStreak++;
     else break;
   }
-  if (curStreak < 2) return null; // cần ít nhất bệt 2
-
-  // Backtest: tìm tất cả vị trí trong lịch sử có bệt đúng bằng curStreak cùng loại
-  // rồi xem phiên tiếp theo (mới hơn = index nhỏ hơn) là gì
+  if (curStreak < 2) return null;
   let breakCount = 0, contCount = 0;
-
-  // Duyệt: với mỗi vị trí p trong seq (p = vị trí kết thúc streak)
-  // tức là seq[p..p+curStreak-1] đều cùng loại, và seq[p+curStreak] khác loại (hoặc hết)
-  // outcome = seq[p-1]
   for (let p = 1; p <= seq.length - curStreak - 1; p++) {
-    // Kiểm tra streak tại p
     const t = seq[p];
     let len = 0;
     for (let j = p; j < seq.length && seq[j] === t; j++) len++;
-    if (len < curStreak) continue;
-    // Kiểm tra phiên trước streak (p+len) khác loại → đây đúng là kết thúc 1 streak
-    // (để tránh đếm trùng trong streak dài hơn)
     if (len !== curStreak) continue;
-    // Kiểm tra biên: phiên sau streak (cũ hơn) nếu còn phải khác loại
     if (p + curStreak < seq.length && seq[p + curStreak] === t) continue;
-
-    const outcome = seq[p - 1]; // phiên ngay sau streak (mới hơn)
-    if (outcome === t) contCount++;  // tiếp tục streak
-    else               breakCount++; // đảo chiều
+    const outcome = seq[p - 1];
+    if (outcome === t) contCount++;
+    else               breakCount++;
   }
-
   const total = breakCount + contCount;
   if (total < MIN_SAMPLES) return null;
-
   const breakRate = breakCount / total;
   const contRate  = contCount  / total;
-
   if (breakRate > MIN_WIN_RATE) {
     const opp = curType === "T" ? "X" : "T";
-    return {
-      signal: opp,
-      winRate: breakRate,
-      sampleCount: total,
-      source: "Cầu Bệt",
-      detail: `Bệt ${curStreak}×${curType==="T"?"Tài":"Xỉu"} → đảo WR=${(breakRate*100).toFixed(0)}% (${total} mẫu)`
-    };
+    return { signal: opp, winRate: breakRate, sampleCount: total, source: "Cầu Bệt",
+      detail: `Bệt ${curStreak}×${curType==="T"?"Tài":"Xỉu"} → đảo WR=${(breakRate*100).toFixed(0)}% (${total} mẫu)` };
   }
   if (contRate > MIN_WIN_RATE) {
-    return {
-      signal: curType,
-      winRate: contRate,
-      sampleCount: total,
-      source: "Cầu Bệt",
-      detail: `Bệt ${curStreak}×${curType==="T"?"Tài":"Xỉu"} → tiếp WR=${(contRate*100).toFixed(0)}% (${total} mẫu)`
-    };
+    return { signal: curType, winRate: contRate, sampleCount: total, source: "Cầu Bệt",
+      detail: `Bệt ${curStreak}×${curType==="T"?"Tài":"Xỉu"} → tiếp WR=${(contRate*100).toFixed(0)}% (${total} mẫu)` };
   }
   return null;
 }
 
 // ═══════════════════════════════════════════════
-//  THUẬT TOÁN 3: CẦU XEN KẼ (1-1 Alternating)
-//  Ý tưởng: Sau chuỗi xen kẽ dài, phiên tiếp theo có xen kẽ tiếp không?
+//  THUẬT TOÁN 3: CẦU XEN KẼ
 // ═══════════════════════════════════════════════
 function alternating(seq) {
   if (seq.length < MIN_SAMPLES + 4) return null;
-
-  // Đo độ dài chuỗi xen kẽ hiện tại (từ đầu seq)
   let altLen = 1;
   for (let i = 1; i < seq.length; i++) {
     if (seq[i] !== seq[i-1]) altLen++;
     else break;
   }
   if (altLen < 4) return null;
-
-  // Kết quả tiếp theo nếu xen kẽ tiếp
   const expectedIfAlt = seq[0] === "T" ? "X" : "T";
-
-  // Backtest: tìm các chuỗi xen kẽ dài đúng altLen trong lịch sử
-  // Chuỗi xen kẽ tại position p có độ dài L:
-  //   seq[p..p+L-1] xen kẽ, seq[p-1] ≠ seq[p] (hoặc p=0), seq[p+L] = seq[p+L-1] (hoặc hết)
-  // outcome = seq[p-1]
   let wins = 0, total = 0;
-
   for (let p = 1; p + altLen <= seq.length; p++) {
-    // Đo độ dài chuỗi xen kẽ bắt đầu tại p
     let L = 1;
     for (let i = p+1; i < seq.length; i++) {
       if (seq[i] !== seq[i-1]) L++;
       else break;
     }
     if (L !== altLen) continue;
-    // Đảm bảo biên trước đó (p+L) không xen kẽ (để không đếm trùng)
     if (p + L < seq.length && seq[p+L] !== seq[p+L-1]) continue;
-
-    const predictedOutcome = seq[p] === "T" ? "X" : "T"; // nếu tiếp tục xen kẽ
+    const predictedOutcome = seq[p] === "T" ? "X" : "T";
     const actual = seq[p - 1];
     if (predictedOutcome === actual) wins++;
     total++;
     if (total >= 60) break;
   }
-
   if (total < MIN_SAMPLES) return null;
   const wr = wins / total;
   if (wr < MIN_WIN_RATE) return null;
-
-  return {
-    signal: expectedIfAlt,
-    winRate: wr,
-    sampleCount: total,
-    source: "Cầu 1-1",
-    detail: `Xen kẽ ${altLen} phiên → ${expectedIfAlt==="T"?"Tài":"Xỉu"} WR=${(wr*100).toFixed(0)}% (${total} mẫu)`
-  };
+  return { signal: expectedIfAlt, winRate: wr, sampleCount: total, source: "Cầu 1-1",
+    detail: `Xen kẽ ${altLen} phiên → ${expectedIfAlt==="T"?"Tài":"Xỉu"} WR=${(wr*100).toFixed(0)}% (${total} mẫu)` };
 }
 
 // ═══════════════════════════════════════════════
-//  THUẬT TOÁN 4: 5-GRAM PATTERN
-//  Ý tưởng: Chuỗi 5 phiên gần nhất giống hệt trong quá khứ → tiếp theo là gì?
+//  THUẬT TOÁN 4: N-GRAM PATTERN
 // ═══════════════════════════════════════════════
 function ngram(seq, n) {
   if (seq.length < n + MIN_SAMPLES + 1) return null;
-
   const curPat = seq.slice(0, n).join("");
-
-  // Tìm tất cả vị trí p (p >= 1) sao cho seq[p..p+n-1] == curPat
-  // outcome = seq[p-1]
   let countT = 0, countX = 0;
   for (let p = 1; p + n <= seq.length; p++) {
     if (seq.slice(p, p+n).join("") !== curPat) continue;
     if (seq[p-1] === "T") countT++;
     else countX++;
   }
-
   const total = countT + countX;
   if (total < MIN_SAMPLES) return null;
-
   const signal = countT >= countX ? "T" : "X";
   const wr = Math.max(countT, countX) / total;
   if (wr < MIN_WIN_RATE) return null;
-
-  return {
-    signal,
-    winRate: wr,
-    sampleCount: total,
-    source: `${n}-gram`,
-    detail: `Pattern [${curPat}] → ${signal==="T"?"Tài":"Xỉu"} WR=${(wr*100).toFixed(0)}% (${total} mẫu)`
-  };
+  return { signal, winRate: wr, sampleCount: total, source: `${n}-gram`,
+    detail: `Pattern [${curPat}] → ${signal==="T"?"Tài":"Xỉu"} WR=${(wr*100).toFixed(0)}% (${total} mẫu)` };
 }
 
 // ═══════════════════════════════════════════════
 //  THUẬT TOÁN 5: CÂN BẰNG (Mean Reversion)
-//  Ý tưởng: 30 phiên gần Tài nhiều → hồi quy về Xỉu (và ngược lại)
-//  Backtest: Trong lịch sử, sau 30 phiên lệch >62% Tài, 20 phiên tiếp có < 50% Tài không?
 // ═══════════════════════════════════════════════
 function meanReversion(hist) {
   if (hist.length < 60) return null;
-
-  const W = 30; // cửa sổ quan sát
+  const W = 30;
   const recent = hist.slice(0, W);
   const ratioT = recent.filter(h => h.type === "T").length / W;
-
-  // Backtest
   let wins = 0, total = 0;
   for (let p = W; p + W < hist.length; p++) {
     const window = hist.slice(p, p + W);
     const r = window.filter(h => h.type === "T").length / W;
-    const next10 = hist.slice(p - 10, p); // 10 phiên tiếp theo (mới hơn)
+    const next10 = hist.slice(p - 10, p);
     if (next10.length < 5) continue;
     const nextT = next10.filter(h => h.type === "T").length / next10.length;
-    if (r > 0.62) {
-      total++;
-      if (nextT < 0.50) wins++; // dự đoán Xỉu
-    } else if (r < 0.38) {
-      total++;
-      if (nextT > 0.50) wins++; // dự đoán Tài
-    }
+    if (r > 0.62) { total++; if (nextT < 0.50) wins++; }
+    else if (r < 0.38) { total++; if (nextT > 0.50) wins++; }
   }
-
   if (total < MIN_SAMPLES) return null;
   const wr = wins / total;
   if (wr < MIN_WIN_RATE) return null;
-
   if (ratioT > 0.62) {
-    return {
-      signal: "X",
-      winRate: wr,
-      sampleCount: total,
-      source: "Cân Bằng",
-      detail: `Tài ${(ratioT*100).toFixed(0)}%/30p → hồi quy Xỉu WR=${(wr*100).toFixed(0)}%`
-    };
+    return { signal: "X", winRate: wr, sampleCount: total, source: "Cân Bằng",
+      detail: `Tài ${(ratioT*100).toFixed(0)}%/30p → hồi quy Xỉu WR=${(wr*100).toFixed(0)}%` };
   }
   if (ratioT < 0.38) {
-    return {
-      signal: "T",
-      winRate: wr,
-      sampleCount: total,
-      source: "Cân Bằng",
-      detail: `Xỉu ${((1-ratioT)*100).toFixed(0)}%/30p → hồi quy Tài WR=${(wr*100).toFixed(0)}%`
-    };
+    return { signal: "T", winRate: wr, sampleCount: total, source: "Cân Bằng",
+      detail: `Xỉu ${((1-ratioT)*100).toFixed(0)}%/30p → hồi quy Tài WR=${(wr*100).toFixed(0)}%` };
   }
   return null;
 }
 
 // ═══════════════════════════════════════════════
-//  THUẬT TOÁN 6: CHART PATTERN (Hình Dạng Đồ Thị)
-//
-//  Ý tưởng ĐÚNG:
-//    - Lấy cửa sổ W phiên liên tiếp (chuỗi tổng xúc xắc)
-//    - Chuẩn hóa về z-score → "hình dạng" không phụ thuộc mức tuyệt đối
-//    - Lưu kho: mỗi mẫu = {shape (z-score), outcome T/X ngay sau cửa sổ}
-//    - Khi dự đoán: lấy W phiên gần nhất, chuẩn hóa, tìm các mẫu tương tự
-//      trong kho (Pearson correlation cao), voting theo outcome
-//
-//  Lưu ý index:
-//    hist[0] = phiên mới nhất
-//    Cửa sổ tại position p: hist[p..p+W-1] (p=0 là cửa sổ hiện tại)
-//    Outcome tại p = hist[p-1].type (phiên ngay sau cửa sổ, mới hơn)
-//    Nên p phải >= 1 khi thu thập mẫu lịch sử
+//  THUẬT TOÁN 6: CHART PATTERN (Tổng)
 // ═══════════════════════════════════════════════
-const CHART_W   = 10;    // cửa sổ 10 phiên
-const MIN_CORR  = 0.80;  // ngưỡng tương đồng Pearson
-const MAX_DB    = 300;   // tối đa 300 mẫu
-const chartDB   = [];    // [{normShape, outcome, totalSeen, wins, label}]
+const CHART_W  = 10;
+const MIN_CORR = 0.80;
+const MAX_DB   = 300;
+const chartDB  = [];
 
 function shapeLabel(normArr) {
-  // Mô tả hình dạng bằng slope + curvature
   const n = normArr.length;
   const half = Math.floor(n/2);
   const first = mean(normArr.slice(0, half));
@@ -444,50 +291,31 @@ function shapeLabel(normArr) {
   const mid = normArr[Math.floor(n/2)];
   const avgEdge = (normArr[0] + normArr[n-1]) / 2;
   const curv = mid - avgEdge;
-
   let s = slope > 0.3 ? "Tăng" : slope < -0.3 ? "Giảm" : "Ngang";
   let c = curv > 0.3 ? "-Lồi" : curv < -0.3 ? "-Lõm" : "";
   const vol = stdDev(normArr);
-  let v = vol > 1.3 ? " Dao Động Mạnh" : vol < 0.5 ? " Ổn Định" : "";
+  let v = vol > 1.3 ? " Dao Động" : vol < 0.5 ? " Ổn Định" : "";
   return s + c + v;
 }
 
 function updateChartDB(hist) {
   if (hist.length < CHART_W + 2) return;
-
-  // Thu thập mẫu từ lịch sử
-  // p = position cửa sổ trong hist (p=1 vì cần outcome tại p-1)
   for (let p = 1; p + CHART_W <= hist.length; p++) {
-    const window = hist.slice(p, p + CHART_W).map(h => h.tong);
-    // Đảo chiều: window[0] là phiên cũ nhất trong cửa sổ → hình dạng đọc cũ→mới
-    const windowChronological = [...window].reverse();
-    const norm = normalize(windowChronological);
-    const outcome = hist[p - 1].type; // phiên ngay sau cửa sổ
-
-    // Tìm mẫu tương tự trong DB
+    const window = hist.slice(p, p + CHART_W).map(h => h.tong).reverse();
+    const norm = normalize(window);
+    const outcome = hist[p - 1].type;
     let bestIdx = -1, bestCorr = -1;
     for (let i = 0; i < chartDB.length; i++) {
       const corr = pearson(chartDB[i].normShape, norm);
       if (corr > bestCorr) { bestCorr = corr; bestIdx = i; }
     }
-
     if (bestCorr >= MIN_CORR && bestIdx >= 0) {
-      // Cập nhật mẫu có sẵn
       chartDB[bestIdx].totalSeen++;
       if (outcome === "T") chartDB[bestIdx].winsT++;
       else chartDB[bestIdx].winsX++;
     } else {
-      // Thêm mẫu mới
-      const entry = {
-        normShape: norm,
-        label: shapeLabel(norm),
-        totalSeen: 1,
-        winsT: outcome === "T" ? 1 : 0,
-        winsX: outcome === "X" ? 1 : 0,
-      };
-      chartDB.push(entry);
-
-      // Giới hạn kích thước: xóa mẫu ít xuất hiện nhất
+      chartDB.push({ normShape: norm, label: shapeLabel(norm), totalSeen: 1,
+        winsT: outcome === "T" ? 1 : 0, winsX: outcome === "X" ? 1 : 0 });
       if (chartDB.length > MAX_DB) {
         chartDB.sort((a,b) => b.totalSeen - a.totalSeen);
         chartDB.splice(MAX_DB);
@@ -498,95 +326,291 @@ function updateChartDB(hist) {
 
 function predictChart(hist) {
   if (hist.length < CHART_W + 2) return null;
-
-  // Cập nhật DB với lịch sử mới nhất
   updateChartDB(hist);
-
-  // Cửa sổ hiện tại: hist[0..CHART_W-1], đọc cũ→mới
   const curWindow = hist.slice(0, CHART_W).map(h => h.tong).reverse();
   const curNorm   = normalize(curWindow);
   const curLabel  = shapeLabel(curNorm);
-
-  // Tìm các mẫu tương tự (corr >= MIN_CORR) có đủ mẫu
   const matches = [];
   for (const entry of chartDB) {
     if (entry.totalSeen < 3) continue;
     const corr = pearson(entry.normShape, curNorm);
     if (corr >= MIN_CORR) matches.push({ entry, corr });
   }
-
   if (!matches.length) return null;
-
-  // Vote theo trọng số = corr * log(1 + totalSeen)
   let wT = 0, wX = 0;
   for (const { entry, corr } of matches) {
     const total = entry.totalSeen;
-    const pT = entry.winsT / total;
-    const pX = entry.winsX / total;
-    const w  = corr * Math.log(1 + total);
-    wT += w * pT;
-    wX += w * pX;
+    const w = corr * Math.log(1 + total);
+    wT += w * (entry.winsT / total);
+    wX += w * (entry.winsX / total);
   }
-
   if (wT + wX < 0.001) return null;
   const prob = wT / (wT + wX);
   const signal = prob >= 0.5 ? "T" : "X";
   const wr = Math.max(prob, 1-prob);
   if (wr < MIN_WIN_RATE) return null;
-
-  // Tính backtest: với mỗi mẫu khớp, winrate thực tế
   const totalSeen = matches.reduce((s, m) => s + m.entry.totalSeen, 0);
+  return { signal, winRate: wr, sampleCount: totalSeen, source: "Chart Tổng",
+    detail: `[${curLabel}] khớp ${matches.length} mẫu → ${signal==="T"?"Tài":"Xỉu"} WR=${(wr*100).toFixed(0)}%`,
+    shapeName: curLabel, matchCount: matches.length };
+}
+
+// ═══════════════════════════════════════════════
+//  THUẬT TOÁN 7: DICE INDIVIDUAL CHART PATTERN
+//  Phân tích hình dạng đồ thị từng xúc xắc (d1, d2, d3) riêng lẻ
+//  Mỗi xúc xắc có DB pattern riêng → vote tổng hợp
+// ═══════════════════════════════════════════════
+const DICE_W   = 8;   // cửa sổ 8 phiên cho từng xúc xắc
+const DICE_MIN_CORR = 0.78;
+const DICE_MAX_DB   = 200;
+const diceDB = [[], [], []]; // DB cho d1, d2, d3
+
+function updateDiceDB(hist) {
+  if (hist.length < DICE_W + 2) return;
+  for (let di = 0; di < 3; di++) {
+    const db = diceDB[di];
+    for (let p = 1; p + DICE_W <= hist.length; p++) {
+      const window = hist.slice(p, p + DICE_W).map(h => h.dice[di]).reverse();
+      const norm = normalize(window);
+      const outcome = hist[p - 1].type;
+      let bestIdx = -1, bestCorr = -1;
+      for (let i = 0; i < db.length; i++) {
+        const corr = pearson(db[i].normShape, norm);
+        if (corr > bestCorr) { bestCorr = corr; bestIdx = i; }
+      }
+      if (bestCorr >= DICE_MIN_CORR && bestIdx >= 0) {
+        db[bestIdx].totalSeen++;
+        if (outcome === "T") db[bestIdx].winsT++;
+        else db[bestIdx].winsX++;
+      } else {
+        db.push({ normShape: norm, totalSeen: 1,
+          winsT: outcome === "T" ? 1 : 0, winsX: outcome === "X" ? 1 : 0 });
+        if (db.length > DICE_MAX_DB) {
+          db.sort((a,b) => b.totalSeen - a.totalSeen);
+          db.splice(DICE_MAX_DB);
+        }
+      }
+    }
+  }
+}
+
+function predictDice(hist) {
+  if (hist.length < DICE_W + 2) return null;
+  updateDiceDB(hist);
+  let totalWT = 0, totalWX = 0, totalSamples = 0, activeCount = 0;
+  const diceSignals = [];
+
+  for (let di = 0; di < 3; di++) {
+    const db = diceDB[di];
+    const curWindow = hist.slice(0, DICE_W).map(h => h.dice[di]).reverse();
+    const curNorm   = normalize(curWindow);
+    const matches = [];
+    for (const entry of db) {
+      if (entry.totalSeen < 3) continue;
+      const corr = pearson(entry.normShape, curNorm);
+      if (corr >= DICE_MIN_CORR) matches.push({ entry, corr });
+    }
+    if (!matches.length) { diceSignals.push(null); continue; }
+    let wT = 0, wX = 0;
+    for (const { entry, corr } of matches) {
+      const total = entry.totalSeen;
+      const w = corr * Math.log(1 + total);
+      wT += w * (entry.winsT / total);
+      wX += w * (entry.winsX / total);
+    }
+    if (wT + wX < 0.001) { diceSignals.push(null); continue; }
+    const prob = wT / (wT + wX);
+    const sig = prob >= 0.5 ? "T" : "X";
+    const wr = Math.max(prob, 1-prob);
+    const seen = matches.reduce((s, m) => s + m.entry.totalSeen, 0);
+    diceSignals.push({ signal: sig, winRate: wr, sampleCount: seen, dice: di+1 });
+    totalWT += wT; totalWX += wX;
+    totalSamples += seen;
+    activeCount++;
+  }
+
+  if (activeCount === 0) return null;
+  const prob = totalWT / (totalWT + totalWX);
+  const signal = prob >= 0.5 ? "T" : "X";
+  const wr = Math.max(prob, 1-prob);
+  if (wr < MIN_WIN_RATE) return null;
+
+  // Build detail string
+  const diceLabels = diceSignals.map((ds, i) => {
+    if (!ds) return `D${i+1}:?`;
+    return `D${i+1}:${ds.signal==="T"?"▲":"▼"}${(ds.winRate*100).toFixed(0)}%`;
+  }).join(" ");
 
   return {
-    signal,
-    winRate: wr,
-    sampleCount: totalSeen,
-    source: "Chart Pattern",
-    detail: `[${curLabel}] khớp ${matches.length} mẫu → ${signal==="T"?"Tài":"Xỉu"} WR=${(wr*100).toFixed(0)}%`,
-    shapeName: curLabel,
-    matchCount: matches.length
+    signal, winRate: wr, sampleCount: Math.round(totalSamples / Math.max(activeCount,1)),
+    source: "Chart Xúc Xắc",
+    detail: `[${diceLabels}] → ${signal==="T"?"Tài":"Xỉu"} WR=${(wr*100).toFixed(0)}%`,
+    diceSignals
   };
 }
 
 // ═══════════════════════════════════════════════
-//  ENSEMBLE: Tổng hợp signals
-//
-//  Dùng simple weighted voting:
-//    - weight = winRate * log(1 + sampleCount)
-//    - Không dùng log-odds Bayesian vì winRate chỉ ~52-70%,
-//      log-odds sẽ khuếch đại sai lệch nhỏ
+//  THUẬT TOÁN 8: DICE MARKOV
+//  Mỗi xúc xắc có xu hướng lặp lại giá trị không?
+//  Phân nhóm: thấp(1-2), trung(3-4), cao(5-6) → Markov 1 bậc
+// ═══════════════════════════════════════════════
+function diceGroupMarkov(hist) {
+  if (hist.length < MIN_SAMPLES + 5) return null;
+
+  function group(v) { return v <= 2 ? "L" : v <= 4 ? "M" : "H"; }
+
+  const results = [];
+  for (let di = 0; di < 3; di++) {
+    const seq = hist.map(h => group(h.dice[di]));
+    // State = current group, xem tổng tiếp theo là T hay X
+    const table = {};
+    for (let p = 1; p < seq.length; p++) {
+      const key = seq[p]; // trạng thái tại p
+      const outcome = hist[p-1].type; // kết quả phiên mới hơn
+      if (!table[key]) table[key] = { T: 0, X: 0 };
+      table[key][outcome]++;
+    }
+    const curGroup = seq[0];
+    const c = table[curGroup];
+    if (!c || (c.T + c.X) < MIN_SAMPLES) continue;
+    const wr = Math.max(c.T, c.X) / (c.T + c.X);
+    if (wr < MIN_WIN_RATE) continue;
+    const sig = c.T >= c.X ? "T" : "X";
+    results.push({ dice: di+1, group: curGroup, sig, wr, n: c.T + c.X });
+  }
+
+  if (!results.length) return null;
+  // Vote theo weight
+  let wT = 0, wX = 0, totalN = 0;
+  for (const r of results) {
+    const w = r.wr * Math.log(1 + r.n);
+    if (r.sig === "T") wT += w; else wX += w;
+    totalN += r.n;
+  }
+  const signal = wT >= wX ? "T" : "X";
+  const prob = Math.max(wT, wX) / (wT + wX);
+  if (prob < MIN_WIN_RATE) return null;
+
+  const groups = {"L":"Thấp","M":"Trung","H":"Cao"};
+  const detail = results.map(r => `D${r.dice}(${groups[r.group]}):${r.sig==="T"?"▲":"▼"}`).join(" ");
+  return {
+    signal, winRate: prob, sampleCount: Math.round(totalN/results.length),
+    source: "Dice Markov",
+    detail: `[${detail}] → ${signal==="T"?"Tài":"Xỉu"} WR=${(prob*100).toFixed(0)}%`
+  };
+}
+
+// ═══════════════════════════════════════════════
+//  THUẬT TOÁN 9: DICE CORRELATION
+//  Phân tích tương quan giữa 3 xúc xắc
+//  Khi d1 cao & d2 cao → xu hướng Tài mạnh hơn không?
+//  Encode: {d1_grp, d2_grp, d3_grp} → T/X count
+// ═══════════════════════════════════════════════
+function diceCorrelation(hist) {
+  if (hist.length < 30) return null;
+  function group(v) { return v <= 3 ? "L" : "H"; } // đơn giản: Thấp/Cao
+
+  const table = {};
+  for (let p = 1; p < hist.length; p++) {
+    const h = hist[p];
+    const key = `${group(h.dice[0])},${group(h.dice[1])},${group(h.dice[2])}`;
+    const outcome = hist[p-1].type;
+    if (!table[key]) table[key] = { T: 0, X: 0 };
+    table[key][outcome]++;
+  }
+
+  // Trạng thái xúc xắc hiện tại
+  const cur = hist[0];
+  const curKey = `${group(cur.dice[0])},${group(cur.dice[1])},${group(cur.dice[2])}`;
+  const c = table[curKey];
+  if (!c || (c.T + c.X) < MIN_SAMPLES) return null;
+  const wr = Math.max(c.T, c.X) / (c.T + c.X);
+  if (wr < MIN_WIN_RATE) return null;
+  const signal = c.T >= c.X ? "T" : "X";
+
+  return {
+    signal, winRate: wr, sampleCount: c.T + c.X,
+    source: "Dice Corr",
+    detail: `Tổ hợp [${curKey}] → ${signal==="T"?"Tài":"Xỉu"} WR=${(wr*100).toFixed(0)}% (${c.T+c.X} mẫu)`
+  };
+}
+
+// ═══════════════════════════════════════════════
+//  THUẬT TOÁN 10: DICE SUM TREND
+//  Phân tích xu hướng từng xúc xắc (tăng/giảm/ngang) trong 5 phiên gần
+//  rồi dự đoán kết quả tiếp theo
+// ═══════════════════════════════════════════════
+function diceTrend(hist) {
+  if (hist.length < 20) return null;
+  const W = 5;
+
+  // Tính slope cho từng xúc xắc
+  function slope(vals) {
+    const n = vals.length;
+    if (n < 2) return 0;
+    let sx = 0, sy = 0, sxy = 0, sx2 = 0;
+    for (let i = 0; i < n; i++) { sx += i; sy += vals[i]; sxy += i*vals[i]; sx2 += i*i; }
+    const d = n*sx2 - sx*sx;
+    return d ? (n*sxy - sx*sy) / d : 0;
+  }
+
+  function trendCode(s) { return s > 0.3 ? "U" : s < -0.3 ? "D" : "F"; }
+
+  // Xây bảng: key = trendCode của 3 xúc xắc (UUU, UDF,...) → {T,X}
+  const table = {};
+  for (let p = W; p < hist.length; p++) {
+    const window = hist.slice(p, p + W).map(h => h.dice).reverse(); // cũ→mới
+    const slopes = [0,1,2].map(di => slope(window.map(d => d[di])));
+    const key = slopes.map(trendCode).join("");
+    const outcome = hist[p-1].type;
+    if (!table[key]) table[key] = { T: 0, X: 0 };
+    table[key][outcome]++;
+  }
+
+  const curWindow = hist.slice(0, W).map(h => h.dice).reverse();
+  const curSlopes = [0,1,2].map(di => slope(curWindow.map(d => d[di])));
+  const curKey = curSlopes.map(trendCode).join("");
+  const c = table[curKey];
+  if (!c || (c.T + c.X) < MIN_SAMPLES) return null;
+  const wr = Math.max(c.T, c.X) / (c.T + c.X);
+  if (wr < MIN_WIN_RATE) return null;
+  const signal = c.T >= c.X ? "T" : "X";
+  const labels = { U: "↑", D: "↓", F: "→" };
+  const trendStr = curSlopes.map((s,i) => `D${i+1}${labels[trendCode(s)]}`).join(" ");
+
+  return {
+    signal, winRate: wr, sampleCount: c.T + c.X,
+    source: "Dice Trend",
+    detail: `[${trendStr}] → ${signal==="T"?"Tài":"Xỉu"} WR=${(wr*100).toFixed(0)}% (${c.T+c.X} mẫu)`
+  };
+}
+
+// ═══════════════════════════════════════════════
+//  ENSEMBLE
 // ═══════════════════════════════════════════════
 function ensemble(signals) {
   if (!signals.length) return { signal: null, confidence: 0.5 };
-
   let wT = 0, wX = 0;
   for (const s of signals) {
     const w = s.winRate * Math.log(1 + s.sampleCount);
     if (s.signal === "T") wT += w;
     else                  wX += w;
   }
-
   const total = wT + wX;
   if (total < 0.001) return { signal: null, confidence: 0.5 };
-
   const signal = wT >= wX ? "T" : "X";
-  // Confidence: tỷ lệ phiếu của bên thắng, scale về [0.5, 1.0]
   const rawConf = Math.max(wT, wX) / total;
-  // Calibrate: không thổi phồng, cap ở 0.80
   const confidence = 0.50 + Math.min(rawConf - 0.50, 0.30);
   return { signal, confidence };
 }
 
 // ═══════════════════════════════════════════════
-//  BACKTEST TỔNG THỂ
-//  Chạy toàn bộ pipeline trên các slice lịch sử để ước tính accuracy
+//  BACKTEST
 // ═══════════════════════════════════════════════
 function backtestSystem(hist, trials = 30) {
   if (hist.length < trials + 20) return null;
   let wins = 0, total = 0;
-
   for (let i = 1; i <= trials; i++) {
-    // Sử dụng hist[i..] để dự đoán hist[i-1]
     const subHist = hist.slice(i);
     if (subHist.length < 20) continue;
     const subSeq  = subHist.map(h => h.type);
@@ -598,7 +622,6 @@ function backtestSystem(hist, trials = 30) {
     if (signal === actual) wins++;
     total++;
   }
-
   if (!total) return null;
   return { wins, total, wr: wins / total };
 }
@@ -609,7 +632,6 @@ function backtestSystem(hist, trials = 30) {
 function collectSignals(seq, hist) {
   const results = [];
   const add = (r) => { if (r) results.push(r); };
-
   add(markov(seq, 1));
   add(markov(seq, 2));
   add(markov(seq, 3));
@@ -619,7 +641,10 @@ function collectSignals(seq, hist) {
   add(ngram(seq, 4));
   if (hist) add(meanReversion(hist));
   if (hist) add(predictChart(hist));
-
+  if (hist) add(predictDice(hist));
+  if (hist) add(diceGroupMarkov(hist));
+  if (hist) add(diceCorrelation(hist));
+  if (hist) add(diceTrend(hist));
   return results;
 }
 
@@ -628,39 +653,34 @@ function collectSignals(seq, hist) {
 // ═══════════════════════════════════════════════
 function predict(hist) {
   if (hist.length < 15) {
-    return {
-      next: null, nextDisplay: "Chưa đủ dữ liệu",
-      confidence: 0.5, confDisplay: "50%",
-      signals: [], backtest: null, typeSeq: [],
-      sumChart: [], streak: 0, curType: "?",
-      chartDBSize: chartDB.length
-    };
+    return { next: null, nextDisplay: "Chưa đủ dữ liệu", confidence: 0.5, confDisplay: "50%",
+      signals: [], backtest: null, typeSeq: [], sumChart: [], streak: 0, curType: "?",
+      chartDBSize: chartDB.length, diceSig: null };
   }
-
   const seq     = hist.map(h => h.type);
   const signals = collectSignals(seq, hist);
   const { signal, confidence } = ensemble(signals);
   const backtest = backtestSystem(hist, 30);
-
-  // Streak hiện tại
   const curType = seq[0];
   let streak = 0;
   for (const t of seq) { if (t === curType) streak++; else break; }
-
-  const chartSig = signals.find(s => s.source === "Chart Pattern");
-
+  const chartSig = signals.find(s => s.source === "Chart Tổng");
+  const diceSig  = signals.find(s => s.source === "Chart Xúc Xắc");
   const vT = signals.filter(s => s.signal === "T").reduce((s,r) => s + r.winRate, 0);
   const vX = signals.filter(s => s.signal === "X").reduce((s,r) => s + r.winRate, 0);
 
+  // Dice stats: avg, trend
+  const diceStats = [0,1,2].map(di => {
+    const vals = hist.slice(0, 20).map(h => h.dice[di]);
+    return { avg: mean(vals).toFixed(2), std: stdDev(vals).toFixed(2),
+             recent: hist.slice(0,5).map(h => h.dice[di]) };
+  });
+
   return {
-    next: signal,
-    nextDisplay: signal === "T" ? "Tài" : signal === "X" ? "Xỉu" : "?",
-    confidence,
-    confDisplay: Math.round(confidence * 100) + "%",
-    signals,
-    signalCount: signals.length,
-    backtest,
-    typeSeq: seq.slice(0, 25),
+    next: signal, nextDisplay: signal === "T" ? "Tài" : signal === "X" ? "Xỉu" : "?",
+    confidence, confDisplay: Math.round(confidence * 100) + "%",
+    signals, signalCount: signals.length,
+    backtest, typeSeq: seq.slice(0, 25),
     sumChart: hist.slice(0, 25).map(h => h.tong),
     diceCharts: {
       d1: hist.slice(0, 25).map(h => h.dice[0]),
@@ -668,12 +688,26 @@ function predict(hist) {
       d3: hist.slice(0, 25).map(h => h.dice[2]),
     },
     streak, curType,
-    votesT: vT.toFixed(2),
-    votesX: vX.toFixed(2),
+    votesT: vT.toFixed(2), votesX: vX.toFixed(2),
     chartDBSize: chartDB.length,
     chartSignal: chartSig || null,
     currentShape: chartSig ? chartSig.shapeName : null,
+    diceSig: diceSig || null,
+    diceStats,
+    diceDBSizes: diceDB.map(db => db.length),
   };
+}
+
+// ═══════════════════════════════════════════════
+//  DICE FREQUENCY ANALYSIS
+// ═══════════════════════════════════════════════
+function diceFreqAnalysis(hist, n = 50) {
+  const slice = hist.slice(0, Math.min(n, hist.length));
+  return [0,1,2].map(di => {
+    const freq = [0,0,0,0,0,0,0]; // idx 1-6
+    for (const h of slice) freq[h.dice[di]]++;
+    return freq.slice(1); // [count for 1, count for 2, ... count for 6]
+  });
 }
 
 // ═══════════════════════════════════════════════
@@ -681,32 +715,47 @@ function predict(hist) {
 // ═══════════════════════════════════════════════
 function buildHTML(pred, h) {
   const n = Math.min(pred.sumChart.length, 25);
-  const labels   = JSON.stringify(Array.from({length:n}, (_,i) => String(Number(h.phien) - (n-1-i))));
-  const sumData  = JSON.stringify([...pred.sumChart.slice(0,n)].reverse());
+  const labels  = JSON.stringify(Array.from({length:n}, (_,i) => String(Number(h.phien) - (n-1-i))));
+  const sumData = JSON.stringify([...pred.sumChart.slice(0,n)].reverse());
+  const d1Data  = JSON.stringify([...pred.diceCharts.d1.slice(0,n)].reverse());
+  const d2Data  = JSON.stringify([...pred.diceCharts.d2.slice(0,n)].reverse());
+  const d3Data  = JSON.stringify([...pred.diceCharts.d3.slice(0,n)].reverse());
   const typeData = JSON.stringify([...pred.typeSeq.slice(0,n)].reverse());
 
-  const isTai    = pred.next === "T";
+  // Dice freq
+  const freqs = diceFreqAnalysis(history, 50);
+  const freqJSON = JSON.stringify(freqs);
+
+  const isTai     = pred.next === "T";
   const predColor = isTai ? "#f5c842" : "#a070ff";
   const predBg    = isTai ? "rgba(245,200,66,0.10)" : "rgba(160,112,255,0.10)";
-
-  const btWR    = pred.backtest ? (pred.backtest.wr * 100).toFixed(1) : "N/A";
-  const btTotal = pred.backtest ? pred.backtest.total : 0;
-  const confPct = Math.round(pred.confidence * 100);
-
-  const sumArr = pred.sumChart;
-  const bolMid = parseFloat(mean(sumArr).toFixed(2));
-  const bolSd  = parseFloat(stdDev(sumArr).toFixed(2));
-  const bolUp  = parseFloat((bolMid + 2*bolSd).toFixed(2));
-  const bolLow = parseFloat((bolMid - 2*bolSd).toFixed(2));
-
+  const btWR      = pred.backtest ? (pred.backtest.wr * 100).toFixed(1) : "N/A";
+  const btTotal   = pred.backtest ? pred.backtest.total : 0;
+  const confPct   = Math.round(pred.confidence * 100);
+  const sumArr    = pred.sumChart;
+  const bolMid    = parseFloat(mean(sumArr).toFixed(2));
+  const bolSd     = parseFloat(stdDev(sumArr).toFixed(2));
+  const bolUp     = parseFloat((bolMid + 2*bolSd).toFixed(2));
+  const bolLow    = parseFloat((bolMid - 2*bolSd).toFixed(2));
   const vT  = Number(pred.votesT), vX = Number(pred.votesX);
   const pctT = (vT+vX) > 0 ? Math.round(vT/(vT+vX)*100) : 50;
   const pctX = 100 - pctT;
 
+  // Dice signal display
+  const diceSigRows = pred.diceSig ? pred.diceSig.diceSignals.map((ds, i) => {
+    if (!ds) return `<span class="dice-sig-nil">D${i+1}: ?</span>`;
+    const col = ds.signal === "T" ? "#f5c842" : "#a070ff";
+    return `<span class="dice-sig-item" style="border-color:${col}">
+      <span style="color:${col}">D${i+1}</span>
+      <span style="color:${col};font-weight:700">${ds.signal==="T"?"▲":"▼"}${(ds.winRate*100).toFixed(0)}%</span>
+    </span>`;
+  }).join("") : '<span style="color:#555;font-size:.7rem">Đang xây dựng kho...</span>';
+
   const sigRows = pred.signals.map(s => {
     const isT = s.signal === "T";
+    const srcColor = s.source.includes("Dice") || s.source.includes("Chart Xúc") ? "#66ddaa" : "#8a6a30";
     return `<tr>
-      <td class="td-src">${s.source}</td>
+      <td class="td-src" style="color:${srcColor}">${s.source}</td>
       <td class="${isT?"sig-t":"sig-x"}">${isT?"▲ Tài":"▼ Xỉu"}</td>
       <td class="td-wr">${(s.winRate*100).toFixed(0)}%</td>
       <td class="td-n">${s.sampleCount}</td>
@@ -714,16 +763,13 @@ function buildHTML(pred, h) {
     </tr>`;
   }).join("") || `<tr><td colspan="5" style="color:#555;padding:8px;font-size:.78rem">Chưa đủ mẫu</td></tr>`;
 
-  // Chart DB top patterns
-  const topDB = [...chartDB]
-    .filter(e => e.totalSeen >= 3)
-    .sort((a,b) => b.totalSeen - a.totalSeen)
-    .slice(0, 8);
+  const topDB = [...chartDB].filter(e => e.totalSeen >= 3)
+    .sort((a,b) => b.totalSeen - a.totalSeen).slice(0, 6);
   const dbRows = topDB.map((e,i) => {
     const total = e.totalSeen;
-    const pT = e.winsT / total, pX = e.winsX / total;
-    const pred2 = pT >= pX ? "T" : "X";
-    const wr = Math.max(pT, pX);
+    const pT = e.winsT / total;
+    const pred2 = pT >= pT ? (e.winsT >= e.winsX ? "T" : "X") : "X";
+    const wr = Math.max(e.winsT, e.winsX) / total;
     return `<tr>
       <td class="td-src">#${i+1}</td>
       <td style="color:#7a8a70;font-size:.62rem;max-width:120px">${e.label}</td>
@@ -731,14 +777,25 @@ function buildHTML(pred, h) {
       <td class="td-wr">${(wr*100).toFixed(0)}%</td>
       <td class="td-n">${total}</td>
     </tr>`;
-  }).join("") || `<tr><td colspan="5" style="color:#555;font-size:.75rem;padding:6px">Đang xây dựng kho mẫu...</td></tr>`;
+  }).join("") || `<tr><td colspan="5" style="color:#555;font-size:.75rem;padding:6px">Đang xây dựng...</td></tr>`;
+
+  const diceStatHTML = [0,1,2].map(di => {
+    const ds = pred.diceStats[di];
+    const col = ["#f5a642","#42c8f5","#a0f542"][di];
+    return `<div class="dstat" style="--dc:${col}">
+      <div class="dstat-lbl">Xúc Xắc ${di+1}</div>
+      <div class="dstat-avg" style="color:${col}">${ds.avg}</div>
+      <div class="dstat-sub">±${ds.std}</div>
+      <div class="dstat-hist">${ds.recent.map(v => `<span class="dv" style="height:${(v/6*100).toFixed(0)}%;background:${col}">${v}</span>`).join("")}</div>
+    </div>`;
+  }).join("");
 
   return `<!DOCTYPE html>
 <html lang="vi">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>SOI CẦU v10 — SUNWIN</title>
+<title>SOI CẦU v11 — SUNWIN</title>
 <link href="https://fonts.googleapis.com/css2?family=Rajdhani:wght@400;600;700&family=Share+Tech+Mono&display=swap" rel="stylesheet">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"><\/script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/chartjs-plugin-annotation/3.0.1/chartjs-plugin-annotation.min.js"><\/script>
@@ -748,6 +805,7 @@ function buildHTML(pred, h) {
   --gold:#c8960a;--gl:#f5c842;--tai:#f5c842;--xiu:#a070ff;
   --bg:#0d0900;--bg2:#160e03;--bg3:#1e1404;--bdr:rgba(180,130,10,.28);
   --txt:#e8d8a0;--dim:#9a7a40;
+  --d1:#f5a642;--d2:#42c8f5;--d3:#a0f542;
   --mono:'Share Tech Mono',monospace;--head:'Rajdhani',sans-serif;
 }
 body{background:var(--bg);min-height:100vh;color:var(--txt);font-family:var(--head);padding:10px}
@@ -780,6 +838,7 @@ body{background:var(--bg);min-height:100vh;color:var(--txt);font-family:var(--he
 .vx{background:linear-gradient(90deg,#6010c0,#a070ff)}
 .vote-labels{display:flex;justify-content:space-between;font-family:var(--mono);font-size:.72rem}
 .two-col{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:10px}
+.three-col{display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;margin-bottom:10px}
 .pred-row{display:grid;grid-template-columns:180px 1fr;gap:10px;margin-bottom:10px}
 .pred-main{background:${predBg};border:2px solid ${predColor};border-radius:12px;padding:16px;text-align:center;box-shadow:0 0 20px ${predColor}30}
 .pred-lbl{font-size:.62rem;color:var(--dim);text-transform:uppercase;letter-spacing:1px}
@@ -801,40 +860,55 @@ body{background:var(--bg);min-height:100vh;color:var(--txt);font-family:var(--he
   padding:8px 12px;margin-bottom:10px;font-size:.70rem;color:#80bb80;line-height:1.6}
 .shape-info{display:flex;align-items:center;gap:10px;background:rgba(100,200,150,.08);
   border:1px solid rgba(100,200,150,.2);border-radius:8px;padding:8px 12px;margin-bottom:10px;font-size:.72rem;color:#90cca8}
-.shape-match{font-family:var(--mono);font-size:.65rem;color:#50aa70;margin-left:auto}
 .pdb{background:var(--bg2);border:1px solid rgba(100,200,150,.25);border-radius:10px;padding:12px;margin-bottom:10px}
 .pdb-title{font-size:.64rem;text-transform:uppercase;letter-spacing:1.5px;color:#60bb90;margin-bottom:8px;display:flex;justify-content:space-between;align-items:center}
 .db-stat-row{display:flex;gap:10px;font-family:var(--mono);font-size:.72rem}
 .db-stat{background:rgba(100,200,150,.08);border:1px solid rgba(100,200,150,.18);border-radius:5px;padding:3px 10px}
 .db-stat .v{color:#66ddaa;font-weight:bold}
-@media(max-width:620px){.metrics{grid-template-columns:repeat(3,1fr)}.pred-row,.two-col{grid-template-columns:1fr}}
+/* Dice stats */
+.dice-stats-row{display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-bottom:10px}
+.dstat{background:var(--bg2);border:1px solid rgba(255,255,255,.08);border-top:2px solid var(--dc,#888);border-radius:8px;padding:8px 10px}
+.dstat-lbl{font-size:.58rem;text-transform:uppercase;letter-spacing:1px;color:var(--dim);margin-bottom:2px}
+.dstat-avg{font-size:1.4rem;font-weight:700;font-family:var(--mono);line-height:1}
+.dstat-sub{font-size:.60rem;color:var(--dim);margin-bottom:6px}
+.dstat-hist{display:flex;align-items:flex-end;gap:3px;height:30px}
+.dv{display:flex;align-items:center;justify-content:center;min-width:18px;border-radius:2px 2px 0 0;font-size:.55rem;color:#000;font-family:var(--mono);font-weight:700;opacity:.85}
+/* Dice signal row */
+.dice-sig-row{display:flex;gap:8px;flex-wrap:wrap;padding:4px 0}
+.dice-sig-item{display:flex;gap:6px;align-items:center;font-family:var(--mono);font-size:.72rem;
+  padding:2px 8px;border-radius:4px;border:1px solid;background:rgba(100,200,150,.06)}
+.dice-sig-nil{font-family:var(--mono);font-size:.70rem;color:#555;padding:2px 8px}
+/* Section separator */
+.section-hdr{font-size:.60rem;text-transform:uppercase;letter-spacing:2px;color:#6a5020;
+  margin:14px 0 6px;padding-bottom:4px;border-bottom:1px solid rgba(160,110,30,.18)}
+@media(max-width:620px){.metrics,.dice-stats-row{grid-template-columns:repeat(2,1fr)}.pred-row,.two-col,.three-col{grid-template-columns:1fr}}
 </style>
 </head>
 <body>
 
 <div class="hdr">
-  <div class="hdr-title">⬦ SOI CẦU v10 — SUNWIN ⬦</div>
+  <div class="hdr-title">⬦ SOI CẦU v11 — SUNWIN ⬦</div>
   <div class="hdr-right">
     <span>Phiên <span class="v">#${h.phien}</span></span>
     <span class="${h.type==="T"?"ct":"cx"} v">${h.type==="T"?"Tài":"Xỉu"}</span>
-    <span>${h.dice.join("·")}</span>
+    <span style="color:var(--d1)">${h.dice[0]}</span>·<span style="color:var(--d2)">${h.dice[1]}</span>·<span style="color:var(--d3)">${h.dice[2]}</span>
     <span>Σ <span class="v">${h.tong}</span></span>
     <span style="color:#555">${new Date().toLocaleTimeString("vi-VN")}</span>
   </div>
 </div>
 
 <div class="algo-note">
-  ⚡ <strong>v10 — Logic Chuẩn:</strong>
-  Markov(1/2/3) · Cầu Bệt · Xen Kẽ · N-gram(4/5) · Cân Bằng · Chart Pattern |
-  <strong>${pred.signalCount}</strong> signal hợp lệ ·
-  Kho đồ thị: <strong style="color:#88ddaa">${pred.chartDBSize}</strong> mẫu ·
-  Backtest 30p: <strong style="color:#aaffaa">${btWR}%</strong>
+  ⚡ <strong>v11 — Phân Tích 3 Xúc Xắc:</strong>
+  Markov(1/2/3) · Cầu Bệt · Xen Kẽ · N-gram(4/5) · Cân Bằng · Chart Tổng ·
+  <strong style="color:#66ddaa">Chart Xúc Xắc</strong> ·
+  <strong style="color:#66ddaa">Dice Markov</strong> ·
+  <strong style="color:#66ddaa">Dice Corr</strong> ·
+  <strong style="color:#66ddaa">Dice Trend</strong> |
+  <strong>${pred.signalCount}</strong> signal ·
+  Kho tổng: <strong style="color:#88ddaa">${pred.chartDBSize}</strong> ·
+  Kho D1/D2/D3: <strong style="color:#88ddaa">${pred.diceDBSizes.join("/")}</strong> ·
+  BT: <strong style="color:#aaffaa">${btWR}%</strong>
 </div>
-
-${pred.chartSignal
-  ? `<div class="shape-info">📊 Hình dạng hiện tại: <strong style="color:#88eebb">${pred.chartSignal.shapeName}</strong>
-     <span class="shape-match">Khớp ${pred.chartSignal.matchCount} mẫu lịch sử</span></div>`
-  : `<div class="shape-info" style="opacity:.5">📊 Đang phân tích hình dạng đồ thị...</div>`}
 
 <div class="metrics">
   <div class="mc" style="--ac:${predColor}">
@@ -857,12 +931,76 @@ ${pred.chartSignal
     <div class="mc-val">${pred.streak}</div>
     <div class="mc-sub">${pred.curType==="T"?"Tài":"Xỉu"} liên tiếp</div>
   </div>
-  <div class="mc" style="--ac:#44cc88">
-    <div class="mc-lbl">Khuôn Mẫu</div>
-    <div class="mc-val">${pred.chartDBSize}</div>
-    <div class="mc-sub">mẫu đồ thị</div>
+  <div class="mc" style="--ac:#66ddaa">
+    <div class="mc-lbl">Kho Dice</div>
+    <div class="mc-val">${pred.diceDBSizes.reduce((a,b)=>a+b,0)}</div>
+    <div class="mc-sub">mẫu 3 xúc xắc</div>
   </div>
 </div>
+
+<div class="section-hdr">⬤ Phân Tích Từng Xúc Xắc</div>
+
+<div class="dice-stats-row">
+  ${diceStatHTML}
+</div>
+
+${pred.diceSig
+  ? `<div class="card" style="margin-bottom:10px">
+      <div class="card-title" style="color:#66ddaa">📊 Tín Hiệu Chart Xúc Xắc — ${pred.diceSig.signal==="T"?"▲ Tài":"▼ Xỉu"} WR=${(pred.diceSig.winRate*100).toFixed(0)}%</div>
+      <div class="dice-sig-row">${diceSigRows}</div>
+     </div>`
+  : `<div class="card" style="margin-bottom:10px;opacity:.5">
+      <div class="card-title" style="color:#66ddaa">📊 Chart Xúc Xắc — Đang xây dựng kho mẫu...</div>
+     </div>`}
+
+<div class="section-hdr">⬤ Đồ Thị 3 Xúc Xắc (25 Phiên)</div>
+
+<div class="three-col">
+  <div class="card" style="margin-bottom:0">
+    <div class="card-title" style="color:var(--d1)">🎲 Xúc Xắc 1</div>
+    <canvas id="d1Chart" height="160"></canvas>
+  </div>
+  <div class="card" style="margin-bottom:0">
+    <div class="card-title" style="color:var(--d2)">🎲 Xúc Xắc 2</div>
+    <canvas id="d2Chart" height="160"></canvas>
+  </div>
+  <div class="card" style="margin-bottom:0">
+    <div class="card-title" style="color:var(--d3)">🎲 Xúc Xắc 3</div>
+    <canvas id="d3Chart" height="160"></canvas>
+  </div>
+</div>
+
+<div class="section-hdr" style="margin-top:10px">⬤ Phân Bổ Tần Suất Xúc Xắc (50 Phiên)</div>
+
+<div class="three-col">
+  <div class="card" style="margin-bottom:0">
+    <div class="card-title" style="color:var(--d1)">Tần Suất D1</div>
+    <canvas id="freq1Chart" height="130"></canvas>
+  </div>
+  <div class="card" style="margin-bottom:0">
+    <div class="card-title" style="color:var(--d2)">Tần Suất D2</div>
+    <canvas id="freq2Chart" height="130"></canvas>
+  </div>
+  <div class="card" style="margin-bottom:0">
+    <div class="card-title" style="color:var(--d3)">Tần Suất D3</div>
+    <canvas id="freq3Chart" height="130"></canvas>
+  </div>
+</div>
+
+<div class="section-hdr" style="margin-top:10px">⬤ Đồ Thị Tổng & Hình Dạng</div>
+
+<div class="two-col">
+  <div class="card" style="margin-bottom:0">
+    <div class="card-title">📈 Biểu Đồ Tổng + Bollinger Band</div>
+    <canvas id="sumChart" height="220"></canvas>
+  </div>
+  <div class="card" style="margin-bottom:0">
+    <div class="card-title">📊 Hình Dạng Z-score (Tổng)</div>
+    <canvas id="shapeChart" height="220"></canvas>
+  </div>
+</div>
+
+<div class="section-hdr" style="margin-top:10px">⬤ Cầu & Tổng Hợp Signal</div>
 
 <div class="card">
   <div class="card-title">⬤ Cầu Hạt — 25 Phiên</div>
@@ -881,33 +1019,6 @@ ${pred.chartSignal
   </div>
 </div>
 
-<div class="two-col">
-  <div class="card" style="margin-bottom:0">
-    <div class="card-title">📈 Biểu Đồ Tổng + Bollinger Band</div>
-    <canvas id="sumChart" height="220"></canvas>
-  </div>
-  <div class="card" style="margin-bottom:0">
-    <div class="card-title">📊 Hình Dạng Đồ Thị (Z-score)</div>
-    <canvas id="shapeChart" height="220"></canvas>
-  </div>
-</div>
-
-<div class="pdb" style="margin-top:10px">
-  <div class="pdb-title">
-    <span>🗂 Kho Khuôn Mẫu Đồ Thị</span>
-    <div class="db-stat-row">
-      <div class="db-stat">Tổng: <span class="v">${chartDB.length}</span></div>
-      <div class="db-stat">Ngưỡng: <span class="v">Pearson≥${MIN_CORR}</span></div>
-    </div>
-  </div>
-  <div style="overflow-x:auto">
-    <table class="sig-table">
-      <thead><tr><th>#</th><th>Tên Mẫu</th><th>Dự Đoán</th><th>WR%</th><th>Lần Gặp</th></tr></thead>
-      <tbody>${dbRows}</tbody>
-    </table>
-  </div>
-</div>
-
 <div class="pred-row">
   <div class="pred-main">
     <div class="pred-lbl">Phiên Tiếp Theo</div>
@@ -918,9 +1029,7 @@ ${pred.chartSignal
     <div class="bt-badge">Backtest: ${btWR}% / ${btTotal} phiên</div>
   </div>
   <div class="card" style="margin-bottom:0;overflow:hidden">
-    <div class="card-title" style="display:flex;justify-content:space-between">
-      <span>${pred.signalCount} tín hiệu đã qua backtest (WR &gt; 52%)</span>
-    </div>
+    <div class="card-title">${pred.signalCount} tín hiệu đã qua backtest (WR &gt; 52%) — <span style="color:#66ddaa">xanh = dice</span></div>
     <div style="max-height:300px;overflow-y:auto">
       <table class="sig-table">
         <thead><tr><th>Thuật Toán</th><th>Signal</th><th>WR%</th><th>N</th><th>Chi Tiết</th></tr></thead>
@@ -930,11 +1039,31 @@ ${pred.chartSignal
   </div>
 </div>
 
+<div class="pdb">
+  <div class="pdb-title">
+    <span>🗂 Kho Khuôn Mẫu Tổng</span>
+    <div class="db-stat-row">
+      <div class="db-stat">Tổng: <span class="v">${chartDB.length}</span></div>
+      <div class="db-stat">D1/D2/D3: <span class="v">${pred.diceDBSizes.join("/")}</span></div>
+    </div>
+  </div>
+  <div style="overflow-x:auto">
+    <table class="sig-table">
+      <thead><tr><th>#</th><th>Tên Mẫu</th><th>Dự Đoán</th><th>WR%</th><th>Lần Gặp</th></tr></thead>
+      <tbody>${dbRows}</tbody>
+    </table>
+  </div>
+</div>
+
 <script>
 Chart.register(window['chartjs-plugin-annotation']);
 const LABELS   = ${labels};
 const SUM_DATA = ${sumData};
+const D1_DATA  = ${d1Data};
+const D2_DATA  = ${d2Data};
+const D3_DATA  = ${d3Data};
 const TYPE_DATA = ${typeData};
+const FREQS    = ${freqJSON};
 const N = SUM_DATA.length;
 const BOLL_UP  = ${bolUp};
 const BOLL_MID = ${bolMid};
@@ -949,7 +1078,86 @@ const beadEl = document.getElementById('beadRoad');
   beadEl.appendChild(b);
 });
 
-// Numbered-circle plugin cho sum chart
+// Helper: make mini dice chart
+function makeDiceChart(id, data, color, label) {
+  const ctx = document.getElementById(id).getContext('2d');
+  new Chart(ctx, {
+    type: 'line',
+    data: { labels: LABELS, datasets: [{
+      label: label, data: data,
+      borderColor: color, borderWidth: 2,
+      pointRadius: 5, pointHoverRadius: 7,
+      pointBackgroundColor: data.map(v => {
+        const alpha = 0.3 + (v/6)*0.7;
+        return color.replace(')',','+alpha+')').replace('rgb','rgba');
+      }),
+      pointBorderColor: color, pointBorderWidth: 1.5,
+      tension: 0.3, fill: {target:'origin', above: color.replace(')',',0.06)').replace('rgb','rgba')}
+    }]},
+    options: {
+      responsive: true, animation: {duration: 400},
+      layout: {padding: {top:8, bottom:4}},
+      scales: {
+        y: { min: 0.5, max: 6.5, ticks: {stepSize:1, color:'#7a6030', font:{size:10,family:'Share Tech Mono'}},
+             grid: {color:'rgba(160,110,30,.10)'}},
+        x: { ticks: {color:'#7a6030', maxTicksLimit:10, font:{size:8,family:'Share Tech Mono'}},
+             grid: {color:'rgba(160,110,30,.06)'}}
+      },
+      plugins: {
+        legend: {display:false},
+        annotation: {annotations:{
+          mid: {type:'line',scaleID:'y',value:3.5,borderColor:'rgba(255,255,255,.10)',borderWidth:1,borderDash:[4,4]}
+        }},
+        tooltip: {backgroundColor:'rgba(10,8,4,.95)',titleColor:'#ffd700',bodyColor:'#f0d0a0',
+          callbacks: {label: ctx => label + ': ' + ctx.parsed.y}}
+      }
+    }
+  });
+}
+
+makeDiceChart('d1Chart', D1_DATA, 'rgb(245,166,66)', 'D1');
+makeDiceChart('d2Chart', D2_DATA, 'rgb(66,200,245)', 'D2');
+makeDiceChart('d3Chart', D3_DATA, 'rgb(160,245,66)', 'D3');
+
+// Frequency bar charts
+function makeFreqChart(id, freqData, color) {
+  const ctx = document.getElementById(id).getContext('2d');
+  const total = freqData.reduce((a,b)=>a+b,0)||1;
+  const pcts  = freqData.map(v => parseFloat((v/total*100).toFixed(1)));
+  const expected = 100/6;
+  new Chart(ctx, {
+    type: 'bar',
+    data: { labels: ['1','2','3','4','5','6'], datasets: [{
+      label: 'Tần suất %', data: pcts,
+      backgroundColor: pcts.map(p => p > expected+3 ? color : p < expected-3 ?
+        'rgba(255,100,100,.6)' : 'rgba(180,180,180,.3)'),
+      borderColor: color, borderWidth: 1.2, borderRadius: 3
+    }]},
+    options: {
+      responsive: true, animation: {duration:300},
+      layout: {padding: {top:6}},
+      scales: {
+        y: { beginAtZero:true, ticks:{color:'#7a6030',font:{size:9,family:'Share Tech Mono'},callback:v=>v+'%'},
+             grid:{color:'rgba(160,110,30,.08)'}},
+        x: { ticks:{color:color,font:{size:10,family:'Share Tech Mono'}},
+             grid:{display:false}}
+      },
+      plugins: {
+        legend:{display:false},
+        annotation:{annotations:{
+          exp:{type:'line',scaleID:'y',value:expected,borderColor:'rgba(255,255,255,.20)',borderWidth:1,borderDash:[4,4]}
+        }},
+        tooltip:{backgroundColor:'rgba(10,8,4,.95)',callbacks:{label:c=>c.parsed.y+'% ('+freqData[c.dataIndex]+' lần)'}}
+      }
+    }
+  });
+}
+
+makeFreqChart('freq1Chart', FREQS[0], '#f5a642');
+makeFreqChart('freq2Chart', FREQS[1], '#42c8f5');
+makeFreqChart('freq3Chart', FREQS[2], '#a0f542');
+
+// Numbered-circle plugin for sum chart
 const numberedPts = {
   id:'numberedPts',
   afterDatasetsDraw(chart){
@@ -983,7 +1191,7 @@ new Chart(document.getElementById('sumChart').getContext('2d'),{
   type:'line', plugins:[numberedPts],
   data:{labels:LABELS,datasets:[
     {label:'BB Upper',data:Array(N).fill(BOLL_UP),borderColor:'rgba(100,180,255,.22)',borderWidth:1,borderDash:[3,4],pointRadius:0,fill:false,tension:0,order:10},
-    {label:'BB Lower',data:Array(N).fill(BOLL_LOW),borderColor:'rgba(100,180,255,.22)',borderWidth:1,borderDash:[3,4],pointRadius:0,fill:{target:'-1',above:'rgba(100,180,255,.05)',below:'rgba(100,180,255,.05)'},tension:0,order:10},
+    {label:'BB Lower',data:Array(N).fill(BOLL_LOW),borderColor:'rgba(100,180,255,.22)',borderWidth:1,borderDash:[3,4],pointRadius:0,fill:{target:'-1',above:'rgba(100,180,255,.05)'},tension:0,order:10},
     {label:'BB Mid',data:Array(N).fill(BOLL_MID),borderColor:'rgba(100,180,255,.13)',borderWidth:1,borderDash:[6,5],pointRadius:0,fill:false,tension:0,order:10},
     {label:'Tổng',data:SUM_DATA,borderColor:'rgba(210,175,80,.75)',borderWidth:2.5,
       pointRadius:16,pointHoverRadius:18,
@@ -1062,7 +1270,6 @@ http.createServer(async (req, res) => {
     res.end(JSON.stringify({loi: msg}));
   };
 
-  // Dashboard HTML
   if (url.pathname === "/bando") {
     if (!history.length) { noData(); return; }
     const h = history[0];
@@ -1071,7 +1278,6 @@ http.createServer(async (req, res) => {
     res.end(buildHTML(pred, h)); return;
   }
 
-  // JSON endpoints
   res.setHeader("Content-Type","application/json;charset=utf-8");
   res.setHeader("Access-Control-Allow-Origin","*");
 
@@ -1080,18 +1286,14 @@ http.createServer(async (req, res) => {
     const h = history[0], p = predict(history);
     res.writeHead(200);
     res.end(JSON.stringify({
-      phien_hien_tai: h.phien,
-      xuc_xac: h.dice,
-      tong_hien_tai: h.tong,
+      phien_hien_tai: h.phien, xuc_xac: h.dice, tong_hien_tai: h.tong,
       ket_qua_hien: h.type==="T"?"Tài":"Xỉu",
       phien_du_doan: String(Number(h.phien)+1),
-      du_doan: p.nextDisplay,
-      do_tin_cay: p.confDisplay,
+      du_doan: p.nextDisplay, do_tin_cay: p.confDisplay,
       backtest_winrate: p.backtest?.wr ?? null,
-      signal_count: p.signalCount,
-      current_shape: p.currentShape,
-      chart_db_size: p.chartDBSize,
-      ver: "v10"
+      signal_count: p.signalCount, current_shape: p.currentShape,
+      chart_db_size: p.chartDBSize, dice_db_sizes: p.diceDBSizes,
+      ver: "v11"
     })); return;
   }
 
@@ -1100,14 +1302,11 @@ http.createServer(async (req, res) => {
     const p = predict(history);
     res.writeHead(200);
     res.end(JSON.stringify({
-      du_doan: p.nextDisplay,
-      do_tin_cay: p.confDisplay,
-      backtest: p.backtest,
-      signals: p.signals,
-      streak: p.streak,
-      chart_signal: p.chartSignal,
-      chart_db_size: p.chartDBSize,
-      ver: "v10"
+      du_doan: p.nextDisplay, do_tin_cay: p.confDisplay,
+      backtest: p.backtest, signals: p.signals, streak: p.streak,
+      chart_signal: p.chartSignal, dice_signal: p.diceSig,
+      dice_stats: p.diceStats, chart_db_size: p.chartDBSize,
+      dice_db_sizes: p.diceDBSizes, ver: "v11"
     })); return;
   }
 
@@ -1117,14 +1316,10 @@ http.createServer(async (req, res) => {
     const pattern = history.slice(0, 30).map(x => x.type).reverse().join("");
     res.writeHead(200);
     res.end(JSON.stringify({
-      phien_hien_tai: Number(h.phien),
-      ket_qua: h.type === "T" ? "Tai" : "Xiu",
-      xuc_xac: h.dice,
-      phien_du_doan: Number(h.phien) + 1,
-      du_doan: p.next === "T" ? "Tai" : "Xiu",
-      do_tin_cay: p.confDisplay,
-      pattern,
-      id: "@sewdangcap"
+      phien_hien_tai: Number(h.phien), ket_qua: h.type === "T" ? "Tai" : "Xiu",
+      xuc_xac: h.dice, phien_du_doan: Number(h.phien) + 1,
+      du_doan: p.next === "T" ? "Tai" : "Xiu", do_tin_cay: p.confDisplay,
+      pattern, id: "@sewdangcap"
     })); return;
   }
 
@@ -1140,11 +1335,26 @@ http.createServer(async (req, res) => {
     })); return;
   }
 
+  if (url.pathname === "/dice/analysis") {
+    if (!history.length) { noData(); return; }
+    const freqs = diceFreqAnalysis(history, 50);
+    const p = predict(history);
+    res.writeHead(200);
+    res.end(JSON.stringify({
+      freq_50_phien: [0,1,2].map(di => ({
+        xuc_xac: di+1,
+        gia_tri: [1,2,3,4,5,6].map((v,i) => ({gia_tri: v, so_lan: freqs[di][i]}))
+      })),
+      dice_db_sizes: p.diceDBSizes,
+      dice_stats: p.diceStats,
+      dice_signal: p.diceSig,
+      ver: "v11"
+    }, null, 2)); return;
+  }
+
   if (url.pathname === "/patterns") {
-    const top = [...chartDB]
-      .filter(e => e.totalSeen >= 2)
-      .sort((a,b) => b.totalSeen - a.totalSeen)
-      .slice(0, 20)
+    const top = [...chartDB].filter(e => e.totalSeen >= 2)
+      .sort((a,b) => b.totalSeen - a.totalSeen).slice(0, 20)
       .map((e,i) => {
         const total = e.totalSeen;
         const pT = e.winsT / total;
@@ -1164,22 +1374,22 @@ http.createServer(async (req, res) => {
   res.writeHead(404);
   res.end(JSON.stringify({
     loi: "Không tìm thấy",
-    endpoints: ["/predict","/predict/detail","/history","/bando","/sunlon","/patterns","/debug"],
-    ver: "v10"
+    endpoints: ["/predict","/predict/detail","/history","/bando","/sunlon","/patterns","/dice/analysis","/debug"],
+    ver: "v11"
   }));
 
 }).listen(PORT, () => {
-  console.log(`✅  SicBo v10.0 — Logic Chuẩn — port ${PORT}`);
-  console.log(`    Dashboard : http://localhost:${PORT}/bando`);
-  console.log(`    API       : http://localhost:${PORT}/predict`);
-  console.log(`    Patterns  : http://localhost:${PORT}/patterns`);
+  console.log(`✅  SicBo v11.0 — Phân Tích 3 Xúc Xắc — port ${PORT}`);
+  console.log(`    Dashboard   : http://localhost:${PORT}/bando`);
+  console.log(`    API         : http://localhost:${PORT}/predict`);
+  console.log(`    Dice Anal.  : http://localhost:${PORT}/dice/analysis`);
+  console.log(`    Patterns    : http://localhost:${PORT}/patterns`);
   console.log(`    Algorithms:`);
-  console.log(`      Markov(1/2/3)  — state [p..p+order-1], outcome=seq[p-1]`);
-  console.log(`      Cầu Bệt       — backtest streak đúng độ dài, outcome=seq[p-1]`);
-  console.log(`      Xen Kẽ 1-1    — backtest altLen đúng, outcome=seq[p-1]`);
-  console.log(`      N-gram(4/5)   — pattern match, outcome=seq[p-1]`);
-  console.log(`      Cân Bằng      — mean reversion 30 phiên`);
-  console.log(`      Chart Pattern — z-norm + Pearson corr, outcome=hist[p-1].type`);
+  console.log(`      [Cũ]  Markov(1/2/3), Cầu Bệt, Xen Kẽ, N-gram(4/5), Cân Bằng, Chart Tổng`);
+  console.log(`      [Mới] Chart Xúc Xắc — z-norm Pearson trên từng D1/D2/D3`);
+  console.log(`      [Mới] Dice Markov   — Thấp/Trung/Cao Markov từng xúc xắc`);
+  console.log(`      [Mới] Dice Corr     — Tổ hợp 3 xúc xắc (8 nhóm)`);
+  console.log(`      [Mới] Dice Trend    — Slope↑↓→ từng xúc xắc trong 5 phiên`);
   syncHistory();
   setInterval(syncHistory, 12000);
 });
