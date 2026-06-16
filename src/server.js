@@ -110,19 +110,20 @@ function decayWeight(age, halfLife = 50) {
 }
 
 // ═══════════════════════════════════════════════
-//  THRESHOLDS — TỐI ƯU V15 (NHẠY & LUÔN DỰ ĐOÁN)
+//  THRESHOLDS — RELAXED để luôn ra kết quả
 // ═══════════════════════════════════════════════
-const MIN_WR       = 0.52;   // Nâng nhẹ mức lọc rác lên 52%
-const MIN_N        = 10;     // Số mẫu tối thiểu 
-const MIN_AGREE    = 1;      // Không cần đồng thuận nhiều nữa
-const MUTE_WR      = 0.40;   // Dưới 40% là tắt tiếng
-const RECENT_CHECK = 15;     // Chỉ kiểm tra phong độ trong 15 phiên gần nhất (phản ứng nhanh hơn)
-const ROLL_WINDOW  = 100;    // Giảm từ 200 xuống 100 để quên đi các chuỗi cầu quá cũ
+const MIN_WR       = 0.52;   // Hạ từ 0.55 → 0.52
+const MIN_N        = 8;      // Hạ từ 15 → 8
+const MIN_AGREE    = 2;      // Hạ từ 3 → 2
+const MUTE_WR      = 0.35;   // Hạ từ 0.40 → 0.35 (chỉ mute khi gãy nặng)
+const RECENT_CHECK = 20;
+const ROLL_WINDOW  = 200;
+const RATIO_MIN    = 0.52;   // Hạ từ 0.58 → 0.52
 
 // ═══════════════════════════════════════════════
 //  ADAPTIVE MUTE SYSTEM
 // ═══════════════════════════════════════════════
-const algoRecentPerf = {}; 
+const algoRecentPerf = {};
 
 function recordAlgoResult(name, correct) {
   if (!algoRecentPerf[name]) algoRecentPerf[name] = { buf: [], muted: false };
@@ -146,45 +147,28 @@ function getRecentWR(name) {
   return p.buf.reduce((s,v)=>s+v,0) / p.buf.length;
 }
 
-function rollingTest(hist, buildFn, windowSize = ROLL_WINDOW, testSize = 40) {
-  const results = [];
-  for (let i = 1; i <= testSize && i + windowSize < hist.length; i++) {
-    const train = hist.slice(i, i + windowSize);
-    const actual = hist[i-1].type;
-    const pred = buildFn(train);
-    if (pred === null) { results.push(null); continue; }
-    results.push(pred === actual ? 1 : 0);
-  }
-  const valid = results.filter(r => r !== null);
-  if (!valid.length) return { wr: null, n: 0, skipped: results.filter(r=>r===null).length };
-  return {
-    wr: valid.reduce((s,v)=>s+v,0) / valid.length,
-    n: valid.length,
-    skipped: results.filter(r=>r===null).length
-  };
-}
-
 // ═══════════════════════════════════════════════
 //  THUẬT TOÁN
 // ═══════════════════════════════════════════════
 
+// ─── A1: MARKOV CHAIN ─────────────────────────
 function algoMarkov(hist, order) {
   const name = `Markov-${order}`;
   if (isMuted(name)) return null;
   const data = hist.slice(0, ROLL_WINDOW);
-  if (data.length < order + MIN_N + 5) return null;
+  if (data.length < order + MIN_N + 2) return null;
 
   const seq = data.map(h => h.type);
-  const fullSeq = seq; 
+  const fullSeq = seq;
   const trainTable = {};
   for (let p = 1; p + order < fullSeq.length; p++) {
-    const stateKey = fullSeq.slice(p, p + order).join(""); 
-    const outcome  = fullSeq[p - 1]; 
+    const stateKey = fullSeq.slice(p, p + order).join("");
+    const outcome  = fullSeq[p - 1];
     if (!trainTable[stateKey]) trainTable[stateKey] = { T:0, X:0 };
     trainTable[stateKey][outcome]++;
   }
 
-  const curState = fullSeq.slice(1, 1 + order).join(""); 
+  const curState = fullSeq.slice(1, 1 + order).join("");
   const c = trainTable[curState];
   if (!c || (c.T + c.X) < MIN_N) return null;
 
@@ -193,7 +177,6 @@ function algoMarkov(hist, order) {
   if (wr < MIN_WR) return null;
 
   const recentWR = getRecentWR(name);
-  if (recentWR !== null && recentWR < MUTE_WR + 0.05) return null;
 
   return {
     signal, winRate: wr, sampleCount: c.T + c.X, source: name,
@@ -202,12 +185,13 @@ function algoMarkov(hist, order) {
   };
 }
 
+// ─── A2: MARKOV INVERT ─────────────────────────
 function algoMarkovInvert(hist) {
   const name = "M-Invert";
   const seq = hist.slice(0, 60).map(h => h.type);
-  if (seq.length < 30) return null;
+  if (seq.length < 25) return null;
 
-  const W = 30;
+  const W = 25;
   const recentSeq = seq.slice(0, W);
   let wrong = 0, total = 0;
 
@@ -227,35 +211,36 @@ function algoMarkovInvert(hist) {
     total++;
   }
 
-  if (total < 8) return null;
+  if (total < 6) return null;
   const errorRate = wrong / total;
-  if (errorRate < 0.60) return null;
+  if (errorRate < 0.58) return null;
 
   const curState = seq[1];
   const c2 = tbl[curState];
   if (!c2 || (c2.T+c2.X) === 0) return null;
   const markovSays = c2.T >= c2.X ? "T" : "X";
   const signal = markovSays === "T" ? "X" : "T";
-  const wr = errorRate; 
+  const wr = errorRate;
 
   return {
     signal, winRate: wr, sampleCount: total, source: name,
-    detail: `Markov gãy ${(errorRate*100).toFixed(0)}%/30p → đảo sang ${signal==="T"?"Tài":"Xỉu"} WR=${(wr*100).toFixed(0)}%`
+    detail: `Markov gãy ${(errorRate*100).toFixed(0)}%/25p → đảo sang ${signal==="T"?"Tài":"Xỉu"} WR=${(wr*100).toFixed(0)}%`
   };
 }
 
+// ─── A3: STREAK ────────────────────────────────
 function algoStreak(hist) {
   const name = "Streak";
   if (isMuted(name)) return null;
   const seq = hist.slice(0, ROLL_WINDOW).map(h => h.type);
-  if (seq.length < MIN_N + 5) return null;
+  if (seq.length < MIN_N + 3) return null;
 
   const curType = seq[0];
   let curStreak = 0;
   for (const t of seq) { if (t === curType) curStreak++; else break; }
-  if (curStreak < 2 || curStreak > 12) return null; 
+  if (curStreak < 2 || curStreak > 12) return null;
 
-  let wBreak = 0, wCont = 0, totalW = 0;
+  let wBreak = 0, wCont = 0, totalW = 0, rawTotal = 0;
   for (let p = 1; p + curStreak < seq.length; p++) {
     const t = seq[p];
     let len = 0;
@@ -263,44 +248,36 @@ function algoStreak(hist) {
     if (len !== curStreak) continue;
     if (p + curStreak < seq.length && seq[p + curStreak] === t) continue;
     const outcome = seq[p-1];
-    const w = decayWeight(p, 60); 
-    if (outcome !== t) wBreak += w;
-    else wCont += w;
+    const w = decayWeight(p, 60);
+    if (outcome !== t) wBreak += w; else wCont += w;
     totalW += w;
+    rawTotal++;
   }
 
-  if (totalW < 0.5) return null;
+  if (totalW < 0.3 || rawTotal < MIN_N) return null;
   const breakRate = wBreak / totalW;
   const contRate  = wCont  / totalW;
-  
-  let rawTotal = 0;
-  for (let p = 1; p + curStreak < seq.length; p++) {
-    const t = seq[p]; let len = 0;
-    for (let j = p; j < seq.length && seq[j] === t; j++) len++;
-    if (len === curStreak && !(p + curStreak < seq.length && seq[p+curStreak] === t)) rawTotal++;
-  }
-  if (rawTotal < MIN_N) return null;
 
   const recentWR = getRecentWR(name);
-  if (recentWR !== null && recentWR < MUTE_WR + 0.05) return null;
 
   if (breakRate > MIN_WR) {
     const sig = curType === "T" ? "X" : "T";
     return { signal: sig, winRate: breakRate, sampleCount: rawTotal, source: name,
-      detail: `Bệt ${curStreak}×${curType==="T"?"Tài":"Xỉu"}→đảo WR=${(breakRate*100).toFixed(0)}%(decay) N=${rawTotal}`, recentWR };
+      detail: `Bệt ${curStreak}×${curType==="T"?"Tài":"Xỉu"}→đảo WR=${(breakRate*100).toFixed(0)}% N=${rawTotal}`, recentWR };
   }
   if (contRate > MIN_WR) {
     return { signal: curType, winRate: contRate, sampleCount: rawTotal, source: name,
-      detail: `Bệt ${curStreak}×${curType==="T"?"Tài":"Xỉu"}→tiếp WR=${(contRate*100).toFixed(0)}%(decay) N=${rawTotal}`, recentWR };
+      detail: `Bệt ${curStreak}×${curType==="T"?"Tài":"Xỉu"}→tiếp WR=${(contRate*100).toFixed(0)}% N=${rawTotal}`, recentWR };
   }
   return null;
 }
 
+// ─── A4: PATTERN MATCH ─────────────────────────
 function algoPattern(hist) {
   const name = "Pattern6";
   if (isMuted(name)) return null;
   const data = hist.slice(0, ROLL_WINDOW);
-  if (data.length < 6 + MIN_N + 2) return null;
+  if (data.length < 6 + MIN_N + 1) return null;
   const seq = data.map(h => h.type);
   const curBlock = seq.slice(0, 6).join("");
 
@@ -320,24 +297,52 @@ function algoPattern(hist) {
   if (wr < MIN_WR) return null;
 
   const recentWR = getRecentWR(name);
-  if (recentWR !== null && recentWR < MUTE_WR + 0.05) return null;
-
   return { signal, winRate: wr, sampleCount: rawN, source: name,
-    detail: `Block[${curBlock}]→${signal==="T"?"Tài":"Xỉu"} WR=${(wr*100).toFixed(0)}%(decay) N=${rawN}`, recentWR };
+    detail: `Block[${curBlock}]→${signal==="T"?"Tài":"Xỉu"} WR=${(wr*100).toFixed(0)}% N=${rawN}`, recentWR };
 }
 
+// ─── A4b: PATTERN MATCH 4 (ngắn hơn, dễ match hơn) ─
+function algoPattern4(hist) {
+  const name = "Pattern4";
+  if (isMuted(name)) return null;
+  const data = hist.slice(0, ROLL_WINDOW);
+  if (data.length < 4 + MIN_N + 1) return null;
+  const seq = data.map(h => h.type);
+  const curBlock = seq.slice(0, 4).join("");
+
+  let wT = 0, wX = 0, rawN = 0;
+  for (let p = 1; p + 4 < seq.length; p++) {
+    if (seq.slice(p, p+4).join("") !== curBlock) continue;
+    const outcome = seq[p-1];
+    const w = decayWeight(p, 60);
+    if (outcome === "T") wT += w; else wX += w;
+    rawN++;
+  }
+  if (rawN < MIN_N) return null;
+  const total = wT + wX;
+  if (total < 0.001) return null;
+  const signal = wT >= wX ? "T" : "X";
+  const wr = Math.max(wT, wX) / total;
+  if (wr < MIN_WR) return null;
+
+  const recentWR = getRecentWR(name);
+  return { signal, winRate: wr, sampleCount: rawN, source: name,
+    detail: `Block4[${curBlock}]→${signal==="T"?"Tài":"Xỉu"} WR=${(wr*100).toFixed(0)}% N=${rawN}`, recentWR };
+}
+
+// ─── A5: ALTERNATING ───────────────────────────
 function algoAlternating(hist) {
   const name = "XenKe";
   if (isMuted(name)) return null;
   const seq = hist.slice(0, ROLL_WINDOW).map(h => h.type);
-  if (seq.length < MIN_N + 4) return null;
+  if (seq.length < MIN_N + 3) return null;
 
   let altLen = 1;
   for (let i = 1; i < seq.length; i++) {
     if (seq[i] !== seq[i-1]) altLen++;
     else break;
   }
-  if (altLen < 4) return null;
+  if (altLen < 3) return null;
 
   const expected = seq[0] === "T" ? "X" : "T";
   let wWin = 0, wTotal = 0, rawN = 0;
@@ -358,28 +363,27 @@ function algoAlternating(hist) {
   if (wr < MIN_WR) return null;
 
   const recentWR = getRecentWR(name);
-  if (recentWR !== null && recentWR < MUTE_WR + 0.05) return null;
-
   return { signal: expected, winRate: wr, sampleCount: rawN, source: name,
-    detail: `Xen kẽ ${altLen}p→${expected==="T"?"Tài":"Xỉu"} WR=${(wr*100).toFixed(0)}%(decay) N=${rawN}`, recentWR };
+    detail: `Xen kẽ ${altLen}p→${expected==="T"?"Tài":"Xỉu"} WR=${(wr*100).toFixed(0)}% N=${rawN}`, recentWR };
 }
 
+// ─── A6: MEAN REVERSION ────────────────────────
 function algoMeanReversion(hist) {
   const name = "MeanRev";
   if (isMuted(name)) return null;
-  if (hist.length < 80) return null;
-  const W = 30;
+  if (hist.length < 60) return null;
+  const W = 25;
   const recent = hist.slice(0, W);
   const ratioT = recent.filter(h => h.type==="T").length / W;
-  if (ratioT > 0.38 && ratioT < 0.62) return null;
+  if (ratioT > 0.40 && ratioT < 0.60) return null;
 
   let wins = 0, total = 0;
-  for (let p = W; p + W + 10 < hist.length; p++) {
+  for (let p = W; p + W + 5 < hist.length; p++) {
     const r = hist.slice(p, p+W).filter(h=>h.type==="T").length / W;
-    const isSkewT = r > 0.62, isSkewX = r < 0.38;
+    const isSkewT = r > 0.60, isSkewX = r < 0.40;
     if (!isSkewT && !isSkewX) continue;
     const next5 = hist.slice(Math.max(0,p-5), p);
-    if (next5.length < 3) continue;
+    if (next5.length < 2) continue;
     const nT = next5.filter(h=>h.type==="T").length / next5.length;
     if (isSkewT && nT < 0.5) wins++;
     else if (isSkewX && nT > 0.5) wins++;
@@ -390,24 +394,24 @@ function algoMeanReversion(hist) {
   if (wr < MIN_WR) return null;
 
   const recentWR = getRecentWR(name);
-  if (recentWR !== null && recentWR < MUTE_WR + 0.05) return null;
-
-  const signal = ratioT > 0.62 ? "X" : "T";
+  const signal = ratioT > 0.60 ? "X" : "T";
   return { signal, winRate: wr, sampleCount: total, source: name,
-    detail: `${ratioT>0.62?"Tài":"Xỉu"} ${Math.round(Math.abs(ratioT>0.5?ratioT:1-ratioT)*100)}%/30p→hồi quy WR=${(wr*100).toFixed(0)}%`, recentWR };
+    detail: `${ratioT>0.60?"Tài":"Xỉu"} ${Math.round(Math.abs(ratioT>0.5?ratioT:1-ratioT)*100)}%/25p→hồi quy WR=${(wr*100).toFixed(0)}%`, recentWR };
 }
 
+// ─── A7: MOMENTUM ──────────────────────────────
 function algoMomentum(hist) {
   const name = "Momentum";
   if (isMuted(name)) return null;
-  if (hist.length < 50) return null;
+  if (hist.length < 40) return null;
 
   const r5  = hist.slice(0,5) .filter(h=>h.type==="T").length / 5;
   const r10 = hist.slice(0,10).filter(h=>h.type==="T").length / 10;
   const r20 = hist.slice(0,20).filter(h=>h.type==="T").length / 20;
 
-  const allBull = r5 > 0.65 && r10 > 0.60 && r20 > 0.58;
-  const allBear = r5 < 0.35 && r10 < 0.40 && r20 < 0.42;
+  // Relaxed thresholds
+  const allBull = r5 > 0.60 && r10 > 0.55 && r20 > 0.52;
+  const allBear = r5 < 0.40 && r10 < 0.45 && r20 < 0.48;
   if (!allBull && !allBear) return null;
 
   let wins = 0, total = 0;
@@ -415,8 +419,8 @@ function algoMomentum(hist) {
     const p5  = hist.slice(p,p+5) .filter(h=>h.type==="T").length/5;
     const p10 = hist.slice(p,p+10).filter(h=>h.type==="T").length/10;
     const p20 = hist.slice(p,p+20).filter(h=>h.type==="T").length/20;
-    const isBull = p5>0.65&&p10>0.60&&p20>0.58;
-    const isBear = p5<0.35&&p10<0.40&&p20<0.42;
+    const isBull = p5>0.60&&p10>0.55&&p20>0.52;
+    const isBear = p5<0.40&&p10<0.45&&p20<0.48;
     if (!isBull && !isBear) continue;
     const pred = isBull ? "T" : "X";
     if (pred === hist[p-1].type) wins++;
@@ -427,15 +431,14 @@ function algoMomentum(hist) {
   if (wr < MIN_WR) return null;
 
   const recentWR = getRecentWR(name);
-  if (recentWR !== null && recentWR < MUTE_WR + 0.05) return null;
-
   const signal = allBull ? "T" : "X";
   return { signal, winRate: wr, sampleCount: total, source: name,
     detail: `Mom ${allBull?"▲":"▼"}[5p:${(r5*100).toFixed(0)}% 10p:${(r10*100).toFixed(0)}% 20p:${(r20*100).toFixed(0)}%] WR=${(wr*100).toFixed(0)}%`, recentWR };
 }
 
-const CHART_W  = 10;
-const MIN_CORR = 0.83;
+// ─── A8: CHART PATTERN ─────────────────────────
+const CHART_W  = 8;   // giảm từ 10 → 8 để match dễ hơn
+const MIN_CORR = 0.78; // giảm từ 0.83 → 0.78
 const MAX_DB   = 300;
 const chartDB  = [];
 
@@ -470,7 +473,7 @@ function updateChartDB(hist) {
 function algoChart(hist) {
   const name = "ChartSum";
   if (isMuted(name)) return null;
-  if (hist.length < CHART_W + 5) return null;
+  if (hist.length < CHART_W + 3) return null;
   updateChartDB(hist);
 
   const curWin  = hist.slice(0, CHART_W).map(h=>h.tong).reverse();
@@ -479,7 +482,7 @@ function algoChart(hist) {
   let wT = 0, wX = 0, totalSeen = 0;
   const matches = [];
   for (const entry of chartDB) {
-    if (entry.totalSeen < 6) continue;
+    if (entry.totalSeen < 4) continue;
     const corr = pearson(entry.norm, curNorm);
     if (corr < MIN_CORR) continue;
     let dWT = 0, dWX = 0;
@@ -498,15 +501,14 @@ function algoChart(hist) {
   if (wr < MIN_WR) return null;
 
   const recentWR = getRecentWR(name);
-  if (recentWR !== null && recentWR < MUTE_WR + 0.05) return null;
-
   return { signal, winRate: wr, sampleCount: totalSeen, source: name,
     detail: `Hình dạng tổng ${matches.length} khớp→${signal==="T"?"Tài":"Xỉu"} WR=${(wr*100).toFixed(0)}%`, recentWR };
 }
 
-const DICE_DB = [[], [], []]; 
-const DICE_W  = 8;
-const DICE_MIN_CORR = 0.80;
+// ─── A9: DICE PATH ─────────────────────────────
+const DICE_DB = [[], [], []];
+const DICE_W  = 6;  // giảm từ 8 → 6
+const DICE_MIN_CORR = 0.75; // giảm từ 0.80 → 0.75
 
 function updateDicePathDB(hist) {
   if (hist.length < DICE_W + 2) return;
@@ -538,7 +540,7 @@ function updateDicePathDB(hist) {
 function algoDicePath(hist) {
   const name = "DicePath";
   if (isMuted(name)) return null;
-  if (hist.length < DICE_W + 8) return null;
+  if (hist.length < DICE_W + 5) return null;
   updateDicePathDB(hist);
 
   let totalWT = 0, totalWX = 0, activeCount = 0;
@@ -550,7 +552,7 @@ function algoDicePath(hist) {
     const curNorm = normalize(curWin);
     let wT = 0, wX = 0, n = 0;
     for (const entry of db) {
-      if (entry.totalSeen < 5) continue;
+      if (entry.totalSeen < 3) continue;
       const corr = pearson(entry.norm, curNorm);
       if (corr < DICE_MIN_CORR) continue;
       const w = corr * Math.log(1 + entry.totalSeen);
@@ -567,26 +569,25 @@ function algoDicePath(hist) {
     activeCount++;
   }
 
-  if (activeCount < 2) return null; 
+  if (activeCount < 1) return null; // giảm từ 2 → 1
   const prob = totalWT / (totalWT + totalWX);
   const signal = prob >= 0.5 ? "T" : "X";
   const wr = Math.max(prob, 1-prob);
   if (wr < MIN_WR) return null;
 
   const recentWR = getRecentWR(name);
-  if (recentWR !== null && recentWR < MUTE_WR + 0.05) return null;
-
   const dStr = perDice.map((d,i) => d ? `D${i+1}:${d.sig==="T"?"▲":"▼"}${(d.wr*100).toFixed(0)}%` : `D${i+1}:?`).join(" ");
   return { signal, winRate: wr, sampleCount: Math.round((totalWT+totalWX)*10), source: name,
     detail: `[${dStr}]→${signal==="T"?"Tài":"Xỉu"} WR=${(wr*100).toFixed(0)}%`,
     perDice, recentWR };
 }
 
+// ─── A10: DICE TREND ───────────────────────────
 function algoDiceTrend(hist) {
   const name = "DiceTrend";
   if (isMuted(name)) return null;
-  if (hist.length < 25) return null;
-  const W = 6;
+  if (hist.length < 20) return null;
+  const W = 5;
 
   function slope(vals) {
     const n = vals.length; if (n < 2) return 0;
@@ -594,7 +595,7 @@ function algoDiceTrend(hist) {
     for (let i=0;i<n;i++){sx+=i;sy+=vals[i];sxy+=i*vals[i];sx2+=i*i;}
     const d=n*sx2-sx*sx; return d?(n*sxy-sx*sy)/d:0;
   }
-  function tc(s){ return s>0.35?"U":s<-0.35?"D":"F"; }
+  function tc(s){ return s>0.25?"U":s<-0.25?"D":"F"; }
 
   const tbl = {};
   const data = hist.slice(0, ROLL_WINDOW);
@@ -615,25 +616,24 @@ function algoDiceTrend(hist) {
   const signal = c.T>=c.X?"T":"X";
 
   const recentWR = getRecentWR(name);
-  if (recentWR !== null && recentWR < MUTE_WR+0.05) return null;
-
   const lab={U:"↑",D:"↓",F:"→"};
   const tStr = curKey.split("").map((k,i)=>`D${i+1}${lab[k]}`).join(" ");
   return { signal, winRate:wr, sampleCount:c.T+c.X, source:name,
     detail:`[${tStr}]→${signal==="T"?"Tài":"Xỉu"} WR=${(wr*100).toFixed(0)}% N=${c.T+c.X}`, recentWR };
 }
 
+// ─── A11: SUM ZONE MARKOV ──────────────────────
 function algoDiceSumZone(hist) {
   const name = "SumZone";
   if (isMuted(name)) return null;
   const data = hist.slice(0, ROLL_WINDOW);
-  if (data.length < 35) return null;
+  if (data.length < 25) return null;
 
   function zone(t){ return t<=7?"L":t<=10?"ML":t<=13?"MH":"H"; }
   const tbl = {};
   for (let p = 2; p < data.length; p++) {
     const key = zone(data[p].tong)+zone(data[p-1].tong);
-    const o = data[p-2].type; 
+    const o = data[p-2].type;
     if (!tbl[key]) tbl[key]={T:0,X:0};
     tbl[key][o]++;
   }
@@ -645,16 +645,111 @@ function algoDiceSumZone(hist) {
   const signal = c.T>=c.X?"T":"X";
 
   const recentWR = getRecentWR(name);
-  if (recentWR !== null && recentWR < MUTE_WR+0.05) return null;
-
-  const zNames={L:"Thấp",ML:"T.Thấp",MH:"T.Cao",H:"Cao"};
   return { signal, winRate:wr, sampleCount:c.T+c.X, source:name,
-    detail:`Vùng[${zNames[curKey.slice(0,curKey.length/2>2?2:1)]}→${zNames[curKey.slice(-1)]}]→${signal==="T"?"Tài":"Xỉu"} WR=${(wr*100).toFixed(0)}% N=${c.T+c.X}`, recentWR };
+    detail:`SumZone[${curKey}]→${signal==="T"?"Tài":"Xỉu"} WR=${(wr*100).toFixed(0)}% N=${c.T+c.X}`, recentWR };
 }
 
+// ─── A12: LAST N RATIO (NEW) ───────────────────
+// Tỷ lệ T/X trong N phiên gần → dự đoán theo xu hướng ngắn hạn
+function algoLastNRatio(hist) {
+  const name = "LastNRatio";
+  if (isMuted(name)) return null;
+  if (hist.length < 30) return null;
+
+  const windows = [5, 8, 12];
+  const votes = { T: 0, X: 0 };
+  let counted = 0;
+
+  for (const w of windows) {
+    const r = hist.slice(0, w).filter(h=>h.type==="T").length / w;
+    if (r >= 0.65) { votes.T++; counted++; }
+    else if (r <= 0.35) { votes.X++; counted++; }
+  }
+
+  if (counted < 2) return null;
+  const signal = votes.T >= votes.X ? "T" : "X";
+  const majority = Math.max(votes.T, votes.X);
+  if (majority < 2) return null;
+
+  // Backtest: how often does dominant trend in last N predict next?
+  let wins = 0, total = 0;
+  for (let p = 12; p < hist.length - 5; p++) {
+    const r5  = hist.slice(p, p+5) .filter(h=>h.type==="T").length/5;
+    const r8  = hist.slice(p, p+8) .filter(h=>h.type==="T").length/8;
+    const r12 = hist.slice(p, p+12).filter(h=>h.type==="T").length/12;
+    const bt = {T:0,X:0};
+    if (r5>=0.65) bt.T++; else if (r5<=0.35) bt.X++;
+    if (r8>=0.65) bt.T++; else if (r8<=0.35) bt.X++;
+    if (r12>=0.65) bt.T++; else if (r12<=0.35) bt.X++;
+    if (bt.T+bt.X < 2) continue;
+    const pred = bt.T >= bt.X ? "T" : "X";
+    if (pred === hist[p-1].type) wins++;
+    total++;
+  }
+  if (total < MIN_N) return null;
+  const wr = wins / total;
+  if (wr < MIN_WR) return null;
+
+  const recentWR = getRecentWR(name);
+  const r5cur = (hist.slice(0,5).filter(h=>h.type==="T").length/5*100).toFixed(0);
+  return { signal, winRate: wr, sampleCount: total, source: name,
+    detail: `Tỷ lệ[${r5cur}% T/5p]→${signal==="T"?"Tài":"Xỉu"} WR=${(wr*100).toFixed(0)}% N=${total}`, recentWR };
+}
+
+// ─── A13: TRIPLE SAME DICE (NEW) ───────────────
+// Phát hiện khi 3 xúc xắc đều tăng/giảm cùng chiều
+function algoTripleDice(hist) {
+  const name = "TripleDice";
+  if (isMuted(name)) return null;
+  if (hist.length < 25) return null;
+
+  const W = 4;
+  function trend(di) {
+    const vals = hist.slice(0, W).map(h=>h.dice[di]);
+    let up = 0, dn = 0;
+    for (let i=1; i<vals.length; i++) {
+      if (vals[i] < vals[i-1]) up++; // newest first → smaller index = newer
+      else if (vals[i] > vals[i-1]) dn++;
+    }
+    return up > dn ? "U" : dn > up ? "D" : "F";
+  }
+
+  const t1 = trend(0), t2 = trend(1), t3 = trend(2);
+  const allUp   = t1==="U" && t2==="U" && t3==="U";
+  const allDown = t1==="D" && t2==="D" && t3==="D";
+  if (!allUp && !allDown) return null;
+
+  let wins = 0, total = 0;
+  for (let p = W; p < hist.length - 2; p++) {
+    const pt = (di) => {
+      const v = hist.slice(p, p+W).map(h=>h.dice[di]);
+      let u=0,d=0;
+      for (let i=1;i<v.length;i++){if(v[i]<v[i-1])u++;else if(v[i]>v[i-1])d++;}
+      return u>d?"U":d>u?"D":"F";
+    };
+    const isAllUp   = pt(0)==="U"&&pt(1)==="U"&&pt(2)==="U";
+    const isAllDown = pt(0)==="D"&&pt(1)==="D"&&pt(2)==="D";
+    if (!isAllUp && !isAllDown) continue;
+    const pred = isAllUp ? "T" : "X";
+    if (pred === hist[p-1].type) wins++;
+    total++;
+  }
+  if (total < MIN_N) return null;
+  const wr = wins / total;
+  if (wr < MIN_WR) return null;
+
+  const recentWR = getRecentWR(name);
+  const signal = allUp ? "T" : "X";
+  return { signal, winRate: wr, sampleCount: total, source: name,
+    detail: `3 xúc xắc đều ${allUp?"↑":"↓"}→${signal==="T"?"Tài":"Xỉu"} WR=${(wr*100).toFixed(0)}% N=${total}`, recentWR };
+}
+
+// ═══════════════════════════════════════════════
+//  ADAPTIVE TRAINING
+// ═══════════════════════════════════════════════
 let lastTrainPhien = null;
 function trainAdaptive(hist) {
-  if (hist.length < 30) return;
+  if (hist.length < 25) return;
   const newestPhien = hist[0].phien;
   if (newestPhien === lastTrainPhien) return;
   lastTrainPhien = newestPhien;
@@ -665,6 +760,7 @@ function trainAdaptive(hist) {
     (h) => algoMarkov(h, 3),
     (h) => algoStreak(h),
     (h) => algoPattern(h),
+    (h) => algoPattern4(h),
     (h) => algoAlternating(h),
     (h) => algoMeanReversion(h),
     (h) => algoMomentum(h),
@@ -672,9 +768,11 @@ function trainAdaptive(hist) {
     (h) => algoDicePath(h),
     (h) => algoDiceTrend(h),
     (h) => algoDiceSumZone(h),
+    (h) => algoLastNRatio(h),
+    (h) => algoTripleDice(h),
   ];
 
-  for (let i = 1; i <= Math.min(25, hist.length - 30); i++) {
+  for (let i = 1; i <= Math.min(25, hist.length - 25); i++) {
     const subHist = hist.slice(i);
     const actual  = hist[i-1].type;
     for (const fn of algoFns) {
@@ -687,6 +785,9 @@ function trainAdaptive(hist) {
   }
 }
 
+// ═══════════════════════════════════════════════
+//  COLLECT ALL SIGNALS
+// ═══════════════════════════════════════════════
 function collectSignals(hist) {
   const results = [];
   const add = r => { if (r) results.push(r); };
@@ -697,51 +798,75 @@ function collectSignals(hist) {
   add(algoStreak(hist));
   add(algoAlternating(hist));
   add(algoPattern(hist));
+  add(algoPattern4(hist));
   add(algoMeanReversion(hist));
   add(algoMomentum(hist));
   add(algoChart(hist));
   add(algoDicePath(hist));
   add(algoDiceTrend(hist));
   add(algoDiceSumZone(hist));
+  add(algoLastNRatio(hist));
+  add(algoTripleDice(hist));
   return results;
 }
 
 // ═══════════════════════════════════════════════
-//  ENSEMBLE V15 — EXPONENTIAL DYNAMIC WEIGHTING
+//  ENSEMBLE — với FALLBACK đảm bảo luôn ra kết quả
 // ═══════════════════════════════════════════════
 function ensemble(signals) {
-  if (!signals.length) return { signal: "T", confidence: 0.5, cntT:0, cntX:0, ratio:0.5 };
+  if (!signals.length) return { signal: null, confidence: 0.50, cntT:0, cntX:0, ratio:0, mode:"no_signal" };
 
-  let wT = 0, wX = 0;
-  
-  for (const s of signals) {
-    const recent = s.recentWR !== null ? s.recentWR : (s.winRate * 0.9);
-    
-    if (recent < 0.40) continue;
-
-    const formFactor = Math.pow(recent, 3);
-    const expFactor = Math.log10(10 + s.sampleCount);
-    const weight = formFactor * expFactor * (s.winRate);
-
-    if (s.signal === "T") wT += weight;
-    else wX += weight;
-  }
-
-  const tot = wT + wX;
   const cntT = signals.filter(s=>s.signal==="T").length;
   const cntX = signals.filter(s=>s.signal==="X").length;
+  const total = signals.length;
+  const ratio = Math.max(cntT,cntX) / total;
 
-  if (!tot) return { signal: cntT >= cntX ? "T" : "X", confidence: 0.5, cntT, cntX, ratio: 0.5 };
+  // ── MODE 1: Đủ đồng thuận mạnh ──
+  if (Math.max(cntT,cntX) >= MIN_AGREE && (ratio >= RATIO_MIN || total < 4)) {
+    let wT = 0, wX = 0;
+    for (const s of signals) {
+      const recentBonus = s.recentWR != null ? (s.recentWR > 0.55 ? 1.5 : s.recentWR > 0.50 ? 1.1 : 0.85) : 1.0;
+      const w = s.winRate * Math.log(1 + s.sampleCount) * recentBonus;
+      if (s.signal==="T") wT+=w; else wX+=w;
+    }
+    const tot = wT+wX;
+    if (!tot) return { signal:null, confidence:0.50, cntT, cntX, ratio, mode:"no_weight" };
 
-  const signal = wT >= wX ? "T" : "X";
-  const rawConf = Math.max(wT, wX) / tot;
-  const conf = Math.min(0.98, 0.50 + (rawConf - 0.50) * 1.2);
+    const signal = wT>=wX?"T":"X";
+    const rawConf = Math.max(wT,wX)/tot;
+    const conf = Math.min(0.88, 0.50 + (rawConf-0.50)*0.75 + ratio*0.10);
+    return { signal, confidence: conf, cntT, cntX, ratio, mode:"strong" };
+  }
 
-  return { signal, confidence: conf, cntT, cntX, ratio: rawConf };
+  // ── MODE 2: FALLBACK — weighted vote từ bất kỳ signal nào ──
+  // Luôn ra dự đoán kể cả khi ít signal, nhưng confidence thấp hơn
+  if (total >= 1) {
+    let wT = 0, wX = 0;
+    for (const s of signals) {
+      const w = s.winRate * Math.sqrt(s.sampleCount + 1);
+      if (s.signal==="T") wT+=w; else wX+=w;
+    }
+    const tot = wT+wX;
+    if (!tot) {
+      // Tiebreak: dùng simple majority
+      const signal = cntT >= cntX ? "T" : "X";
+      return { signal, confidence: 0.51, cntT, cntX, ratio, mode:"tiebreak" };
+    }
+    const signal = wT>=wX?"T":"X";
+    const rawConf = Math.max(wT,wX)/tot;
+    // Confidence thấp hơn khi fallback
+    const conf = Math.min(0.68, 0.50 + (rawConf-0.50)*0.5 + ratio*0.05);
+    return { signal, confidence: conf, cntT, cntX, ratio, mode:"fallback" };
+  }
+
+  return { signal: null, confidence: 0.50, cntT:0, cntX:0, ratio:0, mode:"no_signal" };
 }
 
+// ═══════════════════════════════════════════════
+//  BACKTEST
+// ═══════════════════════════════════════════════
 function backtest(hist, trials = 40) {
-  if (hist.length < trials + ROLL_WINDOW) return null;
+  if (hist.length < trials + 50) return null;
   let wins=0, total=0, skipped=0;
   for (let i = 1; i <= trials; i++) {
     const sub = hist.slice(i);
@@ -755,17 +880,18 @@ function backtest(hist, trials = 40) {
   return { wins, total, skipped, wr: wins/total };
 }
 
+// ═══════════════════════════════════════════════
+//  8-SESSION PATH ANALYSIS
+// ═══════════════════════════════════════════════
 function pathAnalysis(hist) {
   const W = 8;
   const slice = hist.slice(0, W);
   if (slice.length < W) return null;
 
   const dice = [0,1,2].map(di => {
-    const vals = slice.map(h=>h.dice[di]).reverse(); 
+    const vals = slice.map(h=>h.dice[di]).reverse();
     const m    = mean(vals);
     const sd   = stdDev(vals);
-    const last = vals[vals.length-1];
-    const prev = vals[vals.length-2];
     const n = vals.length;
     let sx=0,sy=0,sxy=0,sx2=0;
     for (let i=0;i<n;i++){sx+=i;sy+=vals[i];sxy+=i*vals[i];sx2+=i*i;}
@@ -773,15 +899,13 @@ function pathAnalysis(hist) {
     const s = d?(n*sxy-sx*sy)/d:0;
     const trend = s>0.3?"↑":s<-0.3?"↓":"→";
     const h1 = vals.slice(0,4), h2 = vals.slice(4);
-    const s1 = mean(h1), s2 = mean(h2);
-    const accel = s2-s1;
-    return { vals, mean:m.toFixed(2), sd:sd.toFixed(2), slope:s.toFixed(3), trend, last, prev, accel:accel.toFixed(2) };
+    const accel = mean(h2)-mean(h1);
+    return { vals, mean:m.toFixed(2), sd:sd.toFixed(2), slope:s.toFixed(3), trend, last:vals[vals.length-1], prev:vals[vals.length-2], accel:accel.toFixed(2) };
   });
 
   const sums = slice.map(h=>h.tong).reverse();
   const sumMean  = mean(sums);
   const sumSd    = stdDev(sums);
-  const sumNorm  = normalize(sums);
   const sumLast  = sums[sums.length-1];
   const sumTrend = sums[sums.length-1] > sums[sums.length-2] ? "↑" : sums[sums.length-1] < sums[sums.length-2] ? "↓" : "→";
 
@@ -791,10 +915,7 @@ function pathAnalysis(hist) {
   let subPattern = "Hỗn hợp";
   if (typeStr === "TTTTTTTT") subPattern = "Cầu Tài 8";
   else if (typeStr === "XXXXXXXX") subPattern = "Cầu Xỉu 8";
-  else if (/^(TT|XX)/.test(typeStr) && typeStr.length === 8) {
-    const pairs = typeStr.match(/../g);
-    if (pairs && new Set(pairs).size === 1) subPattern = "Bệt kép";
-  } else if (typeStr.split("").every((c,i,a)=>i===0||c!==a[i-1])) subPattern = "Xen kẽ hoàn toàn";
+  else if (typeStr.split("").every((c,i,a)=>i===0||c!==a[i-1])) subPattern = "Xen kẽ hoàn toàn";
   else {
     let trans = 0;
     for (let i=1;i<typeStr.length;i++) if(typeStr[i]!==typeStr[i-1]) trans++;
@@ -809,24 +930,28 @@ function pathAnalysis(hist) {
   const isDiverging  = convergence.some(r=>r>=4);
 
   return {
-    dice, sums, sumNorm, sumMean:sumMean.toFixed(2), sumSd:sumSd.toFixed(2), sumLast, sumTrend,
+    dice, sums, sumMean:sumMean.toFixed(2), sumSd:sumSd.toFixed(2), sumLast, sumTrend,
     types, typeStr, subPattern, convergence, isConverging, isDiverging
   };
 }
 
+// ═══════════════════════════════════════════════
+//  MAIN PREDICT
+// ═══════════════════════════════════════════════
 function predict(hist) {
-  if (hist.length < 30) {
+  if (hist.length < 20) {
     return {
       next:null, nextDisplay:"Chưa đủ dữ liệu", confidence:0.5, confDisplay:"50%",
       signals:[], backtest:null, typeSeq:[], sumChart:[], streak:0, curType:"?",
-      chartDBSize:chartDB.length, cntT:0, cntX:0, path:null, mutedAlgos:[]
+      chartDBSize:chartDB.length, cntT:0, cntX:0, path:null, mutedAlgos:[], mode:"no_data"
     };
   }
 
   trainAdaptive(hist);
 
   const signals  = collectSignals(hist);
-  const { signal, confidence, cntT, cntX, ratio } = ensemble(signals);
+  const ens      = ensemble(signals);
+  const { signal, confidence, cntT, cntX, ratio, mode } = ens;
   const bt       = backtest(hist, 40);
   const path     = pathAnalysis(hist);
 
@@ -853,7 +978,7 @@ function predict(hist) {
     nextDisplay: signal==="T"?"Tài":signal==="X"?"Xỉu":"Chờ",
     confidence, confDisplay: Math.round(confidence*100)+"%",
     signals, signalCount:signals.length,
-    cntT, cntX, ratio,
+    cntT, cntX, ratio, mode,
     backtest:bt, typeSeq:seq.slice(0,25),
     sumChart:hist.slice(0,25).map(h=>h.tong),
     diceCharts:{
@@ -879,7 +1004,7 @@ function diceFreqAnalysis(hist, n=50) {
 }
 
 // ═══════════════════════════════════════════════
-//  HTML — v15
+//  HTML — v14
 // ═══════════════════════════════════════════════
 function buildHTML(pred, h) {
   const n = Math.min(pred.sumChart.length, 25);
@@ -901,6 +1026,7 @@ function buildHTML(pred, h) {
 
   const noSignal  = pred.next === null;
   const isTai     = pred.next === "T";
+  const isFallback = pred.mode === "fallback" || pred.mode === "tiebreak";
   const predColor = noSignal?"#666":(isTai?"#f5c842":"#a070ff");
   const predBg    = noSignal?"rgba(80,80,80,.08)":(isTai?"rgba(245,200,66,.10)":"rgba(160,112,255,.10)");
   const confPct   = Math.round(pred.confidence*100);
@@ -934,6 +1060,11 @@ function buildHTML(pred, h) {
     ? pred.mutedAlgos.map(m=>`<span class="muted-badge">${m.name} ${Math.round(Number(m.recentWR)*100)}%</span>`).join("")
     : `<span style="color:#406030;font-size:.65rem">Không có — tất cả đang hoạt động</span>`;
 
+  // Mode badge
+  const modeBadge = isFallback
+    ? `<div class="fallback-badge">⚡ Dự đoán bằng Fallback Vote — độ tin cậy thấp hơn</div>`
+    : pred.mode==="strong" ? `<div class="strong-badge">✅ Đồng thuận mạnh (${pred.cntT}T/${pred.cntX}X)</div>` : "";
+
   let pathHTML = "";
   if (path) {
     const diceColors = ["#f5a642","#42c8f5","#a0f542"];
@@ -951,34 +1082,23 @@ function buildHTML(pred, h) {
         <div class="pdv">${minibar}</div>
         <div class="pddetail">
           <span>Slope: <b style="color:${parseFloat(d.slope)>0?"#88ee88":parseFloat(d.slope)<0?"#ee6666":"#aaa"}">${d.slope}</b></span>
-          <span>5-8p: <b>${d.vals.slice(0,4).join("-")}</b></span>
-          <span>1-4p: <b>${d.vals.slice(4).join("-")}</b></span>
+          <span>Vals: <b>${d.vals.join("-")}</b></span>
           ${Math.abs(accelVal)>0.3?`<span style="color:${accelVal>0?"#88ee88":"#ee6666"}">${accelVal>0?"Tăng tốc":"Giảm tốc"}</span>`:""}
         </div>
       </div>`;
     }).join("");
 
     const convColor = path.isConverging?"#88ee88":path.isDiverging?"#ee6666":"#aaa";
-    const convText  = path.isConverging?"Hội tụ (ổn định)":path.isDiverging?"Phân kỳ (biến động)":"Trung tính";
+    const convText  = path.isConverging?"Hội tụ":path.isDiverging?"Phân kỳ":"Trung tính";
     const typeBeads = path.types.map((t,i)=>`<div class="pbead ${t==="T"?"pbt":"pbx"}" style="${i===path.types.length-1?"border:2px solid #fff":""}">${t}</div>`).join("");
 
     pathHTML = `
 <div class="section-hdr">⬤ Phân Tích Đường Đi 8 Phiên Gần Nhất</div>
 <div class="path-container">
   <div class="path-header">
-    <div>
-      <span class="path-label">Pattern:</span>
-      <span class="path-pattern">${path.subPattern}</span>
-    </div>
-    <div>
-      <span class="path-label">Tổng hướng:</span>
-      <span style="color:${path.sumTrend==="↑"?"#88ee88":path.sumTrend==="↓"?"#ee6666":"#aaa"};font-size:1.1rem">${path.sumTrend}</span>
-      <span style="font-family:var(--mono);font-size:.75rem">${path.sumMean}±${path.sumSd}</span>
-    </div>
-    <div>
-      <span class="path-label">Xúc xắc:</span>
-      <span style="color:${convColor}">${convText}</span>
-    </div>
+    <div><span class="path-label">Pattern:</span><span class="path-pattern">${path.subPattern}</span></div>
+    <div><span class="path-label">Tổng:</span><span style="color:${path.sumTrend==="↑"?"#88ee88":path.sumTrend==="↓"?"#ee6666":"#aaa"};font-size:1.1rem">${path.sumTrend}</span><span style="font-family:var(--mono);font-size:.75rem"> ${path.sumMean}±${path.sumSd}</span></div>
+    <div><span class="path-label">Xúc xắc:</span><span style="color:${convColor}">${convText}</span></div>
   </div>
   <div class="path-types">${typeBeads}</div>
   <div class="path-dice-section">${dicePathRows}</div>
@@ -988,16 +1108,10 @@ function buildHTML(pred, h) {
   </div>
 </div>
 
-<div class="section-hdr">⬤ Đồ Thị Đường Đi 8 Phiên (Chi Tiết)</div>
+<div class="section-hdr">⬤ Đồ Thị Đường Đi 8 Phiên</div>
 <div class="two-col">
-  <div class="card" style="margin-bottom:0">
-    <div class="card-title" style="color:#ccaa44">📍 Đường Đi Tổng (8 phiên)</div>
-    <canvas id="path8SumChart" height="200"></canvas>
-  </div>
-  <div class="card" style="margin-bottom:0">
-    <div class="card-title" style="color:#66ccaa">📍 Đường Đi 3 Xúc Xắc (8 phiên)</div>
-    <canvas id="path8DiceChart" height="200"></canvas>
-  </div>
+  <div class="card" style="margin-bottom:0"><div class="card-title" style="color:#ccaa44">📍 Tổng (8 phiên)</div><canvas id="path8SumChart" height="200"></canvas></div>
+  <div class="card" style="margin-bottom:0"><div class="card-title" style="color:#66ccaa">📍 3 Xúc Xắc (8 phiên)</div><canvas id="path8DiceChart" height="200"></canvas></div>
 </div>`;
   }
 
@@ -1012,7 +1126,7 @@ function buildHTML(pred, h) {
     </div>`;
   }).join("");
 
-  const topDB=[...chartDB].filter(e=>e.totalSeen>=6).sort((a,b)=>b.totalSeen-a.totalSeen).slice(0,5);
+  const topDB=[...chartDB].filter(e=>e.totalSeen>=4).sort((a,b)=>b.totalSeen-a.totalSeen).slice(0,5);
   const dbRows=topDB.map((e,i)=>{
     const wr=Math.max(e.wT,e.wX)/e.totalSeen;
     const p2=e.wT>=e.wX?"T":"X";
@@ -1024,7 +1138,7 @@ function buildHTML(pred, h) {
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>minhsang — SOI CẦU v15</title>
+<title>SOI CẦU v14 — SUNWIN</title>
 <link href="https://fonts.googleapis.com/css2?family=Rajdhani:wght@400;600;700&family=Share+Tech+Mono&display=swap" rel="stylesheet">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"><\/script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/chartjs-plugin-annotation/3.0.1/chartjs-plugin-annotation.min.js"><\/script>
@@ -1072,8 +1186,10 @@ body{background:var(--bg);min-height:100vh;color:var(--txt);font-family:var(--he
 .conf-fill{height:100%;background:${predColor};width:${confPct}%;border-radius:2px}
 .bt-badge{font-family:var(--mono);font-size:.62rem;padding:2px 8px;border-radius:4px;
   background:rgba(100,220,100,.10);border:1px solid rgba(100,220,100,.22);color:#70cc70;display:inline-block;margin-top:4px}
-.skip-badge{font-family:var(--mono);font-size:.68rem;padding:4px 10px;border-radius:6px;
-  background:rgba(255,180,40,.10);border:1px solid rgba(255,180,40,.30);color:#ffcc60;display:inline-block;margin-top:4px}
+.fallback-badge{font-family:var(--mono);font-size:.65rem;padding:4px 10px;border-radius:6px;
+  background:rgba(255,160,40,.12);border:1px solid rgba(255,160,40,.32);color:#ffaa44;display:inline-block;margin-top:4px}
+.strong-badge{font-family:var(--mono);font-size:.65rem;padding:4px 10px;border-radius:6px;
+  background:rgba(80,220,100,.12);border:1px solid rgba(80,220,100,.32);color:#60dd80;display:inline-block;margin-top:4px}
 .sig-table{width:100%;border-collapse:collapse;font-size:.67rem}
 .sig-table th{color:var(--dim);padding:3px 5px;border-bottom:1px solid var(--bdr);text-align:left;font-weight:400;font-size:.57rem;text-transform:uppercase}
 .sig-table td{padding:4px 5px;border-bottom:1px solid rgba(255,255,255,.03);vertical-align:top}
@@ -1115,7 +1231,7 @@ body{background:var(--bg);min-height:100vh;color:var(--txt);font-family:var(--he
 <body>
 
 <div class="hdr">
-  <div class="hdr-title">⬦ minhsang — SOI CẦU v15 ⬦</div>
+  <div class="hdr-title">⬦ SOI CẦU v14 — SUNWIN ⬦</div>
   <div class="hdr-right">
     <span>Phiên <span class="v">#${h.phien}</span></span>
     <span style="color:${h.type==="T"?"var(--tai)":"var(--xiu)"};font-weight:700">${h.type==="T"?"Tài":"Xỉu"}</span>
@@ -1134,7 +1250,7 @@ body{background:var(--bg);min-height:100vh;color:var(--txt);font-family:var(--he
   <div class="mc" style="--ac:#44aaff">
     <div class="mc-lbl">Confidence</div>
     <div class="mc-val">${confPct}%</div>
-    <div class="mc-sub">${pred.signalCount} signals</div>
+    <div class="mc-sub">${pred.signalCount} signals · ${pred.mode||""}</div>
   </div>
   <div class="mc" style="--ac:#78cc78">
     <div class="mc-lbl">Backtest WR</div>
@@ -1149,18 +1265,18 @@ body{background:var(--bg);min-height:100vh;color:var(--txt);font-family:var(--he
   <div class="mc" style="--ac:#66eecc">
     <div class="mc-lbl">Consensus</div>
     <div class="mc-val">${consensusPct}%</div>
-    <div class="mc-sub">${pred.cntT}▲ · ${pred.cntX}▼ signal</div>
+    <div class="mc-sub">${pred.cntT}▲ · ${pred.cntX}▼ signals</div>
   </div>
 </div>
 
 <div class="card">
-  <div class="card-title">🔇 Thuật toán bị tắt (đang gãy) — Muted</div>
+  <div class="card-title">🔇 Thuật toán bị tắt — Muted</div>
   <div>${mutedHTML}</div>
 </div>
 
 ${pathHTML}
 
-<div class="section-hdr">⬤ Đồ Thị 25 Phiên — Tổng & 3 Xúc Xắc</div>
+<div class="section-hdr">⬤ Đồ Thị 25 Phiên</div>
 <div class="card" style="margin-bottom:8px">
   <div class="card-title">📈 Biểu Đồ Tổng + Bollinger</div>
   <canvas id="sumChart" height="210"></canvas>
@@ -1206,15 +1322,13 @@ ${pathHTML}
     <div class="pred-lbl">Phiên Tiếp Theo</div>
     <div style="font-size:.65rem;color:var(--dim)">#${Number(h.phien)+1}</div>
     <div class="pred-val">${pred.nextDisplay}</div>
-    ${noSignal
-      ? `<div class="skip-badge">⚠ Tín hiệu mâu thuẫn — Nên BỎ PHIÊN</div>`
-      : `<div class="conf-track"><div class="conf-fill"></div></div>
-         <div style="font-family:var(--mono);font-size:.95rem;color:#fff">${confPct}% — ${pred.cntT}T/${pred.cntX}X</div>`
-    }
+    ${modeBadge}
+    ${!noSignal?`<div class="conf-track"><div class="conf-fill"></div></div>
+      <div style="font-family:var(--mono);font-size:.95rem;color:#fff">${confPct}% — ${pred.cntT}T/${pred.cntX}X</div>`:""}
     <div class="bt-badge">BT: ${btWR}% / ${btTotal}p</div>
   </div>
   <div class="card" style="margin-bottom:0;overflow:hidden">
-    <div class="card-title">${pred.signalCount} tín hiệu đạt ngưỡng WR≥52% N≥10</div>
+    <div class="card-title">${pred.signalCount} tín hiệu (ngưỡng WR≥52% N≥8)</div>
     <div style="max-height:290px;overflow-y:auto">
       <table class="sig-table">
         <thead><tr><th>Algo</th><th>Signal</th><th>WR%</th><th>N</th><th>Chi Tiết</th></tr></thead>
@@ -1270,27 +1384,22 @@ const numberedPts={id:'numberedPts',afterDatasetsDraw(chart){
 
 new Chart(document.getElementById('sumChart'),{type:'line',plugins:[numberedPts],
   data:{labels:LABELS,datasets:[
-    {label:'BB+',data:Array(N).fill(BOLL_UP),borderColor:'rgba(100,180,255,.18)',borderWidth:1,borderDash:[3,4],pointRadius:0,fill:false,tension:0.4,order:10},
-    {label:'BB-',data:Array(N).fill(BOLL_LOW),borderColor:'rgba(100,180,255,.18)',borderWidth:1,borderDash:[3,4],pointRadius:0,fill:{target:'-1',above:'rgba(100,180,255,.04)'},tension:0.4,order:10},
-    {label:'Mid',data:Array(N).fill(BOLL_MID),borderColor:'rgba(100,180,255,.10)',borderWidth:1,borderDash:[6,5],pointRadius:0,fill:false,tension:0.4,order:10},
-    {label:'Tổng',data:SUM_DATA,
-      borderColor:'rgba(255, 215, 0, 0.9)', borderWidth:3, tension:0.4,
-      pointRadius:14, pointHoverRadius:17,
-      pointBackgroundColor:SUM_DATA.map(v=>v>=11?'#ffb300':'#a020f0'),
-      pointBorderColor:SUM_DATA.map(v=>v>=11?'#ffffff':'#ffffff'),
-      pointBorderWidth:2, fill: true, backgroundColor: 'rgba(255, 215, 0, 0.05)', order:0}
+    {label:'BB+',data:Array(N).fill(BOLL_UP),borderColor:'rgba(100,180,255,.18)',borderWidth:1,borderDash:[3,4],pointRadius:0,fill:false,tension:0,order:10},
+    {label:'BB-',data:Array(N).fill(BOLL_LOW),borderColor:'rgba(100,180,255,.18)',borderWidth:1,borderDash:[3,4],pointRadius:0,fill:{target:'-1',above:'rgba(100,180,255,.04)'},tension:0,order:10},
+    {label:'Mid',data:Array(N).fill(BOLL_MID),borderColor:'rgba(100,180,255,.10)',borderWidth:1,borderDash:[6,5],pointRadius:0,fill:false,tension:0,order:10},
+    {label:'Tổng',data:SUM_DATA,borderColor:'rgba(200,165,70,.6)',borderWidth:2,
+      pointRadius:15,pointHoverRadius:17,
+      pointBackgroundColor:SUM_DATA.map(v=>v>=11?'#a07000':'#4a0090'),
+      pointBorderColor:SUM_DATA.map(v=>v>=11?'#f5c842':'#a070ff'),
+      pointBorderWidth:2,tension:0,fill:false,order:0}
   ]},
-  options:{
-    responsive:true,animation:{duration:600, easing: 'easeOutQuart'},
-    layout:{padding:{top:16,bottom:4,left:4,right:4}},
+  options:{responsive:true,animation:{duration:400},layout:{padding:{top:16,bottom:4,left:4,right:4}},
     scales:{
       y:{min:3,max:18,ticks:{color:'#806020',stepSize:3,font:{size:10,family:'Share Tech Mono'}},grid:{color:'rgba(150,100,20,.10)'}},
       x:{ticks:{color:'#604010',maxTicksLimit:15,font:{size:8,family:'Share Tech Mono'}},grid:{color:'rgba(150,100,20,.06)'}}
     },
     plugins:{legend:{display:false},
-      annotation:{annotations:{
-        mid:{type:'line',scaleID:'y',value:10.5,borderColor:'rgba(255,255,255,.15)',borderWidth:1,borderDash:[6,5], shadowBlur: 10, shadowColor: 'white'},
-      }},
+      annotation:{annotations:{mid:{type:'line',scaleID:'y',value:10.5,borderColor:'rgba(255,255,255,.07)',borderWidth:1,borderDash:[6,5]}}},
       tooltip:{backgroundColor:'rgba(6,4,0,.95)',titleColor:'#ffd700',bodyColor:'#e0c080',
         callbacks:{label:c=>{const v=c.parsed.y;if(c.dataset.label!=='Tổng')return c.dataset.label+': '+v.toFixed(1);return'Tổng: '+v+' → '+(v>=11?'🟡 Tài':'🟣 Xỉu');}}}
     }
@@ -1298,19 +1407,18 @@ new Chart(document.getElementById('sumChart'),{type:'line',plugins:[numberedPts]
 });
 
 function makeDiceChart(id,data,color,label){
-  const bgCol = color.replace('rgb', 'rgba').replace(')', ', 0.15)');
   new Chart(document.getElementById(id),{type:'line',
     data:{labels:LABELS,datasets:[{
-      label,data,borderColor:color,borderWidth:2.5, tension: 0.4,
-      pointRadius:5,pointHoverRadius:7,
-      pointBackgroundColor:color,
-      pointBorderColor:'#fff',pointBorderWidth:1.5,
-      fill: true, backgroundColor: bgCol
+      label,data,borderColor:color,borderWidth:1.8,
+      pointRadius:4,pointHoverRadius:6,
+      pointBackgroundColor:data.map(v=>{const a=0.3+(v/6)*0.7;return color.replace(')',','+a+')').replace('rgb','rgba');}),
+      pointBorderColor:color,pointBorderWidth:1.2,tension:0.3,
+      fill:{target:'origin',above:color.replace(')',',0.05)').replace('rgb','rgba')}
     }]},
-    options:{responsive:true,animation:{duration:400},layout:{padding:{top:6,bottom:2}},
+    options:{responsive:true,animation:{duration:300},layout:{padding:{top:6,bottom:2}},
       scales:{
         y:{min:0.5,max:6.5,ticks:{stepSize:1,color:'#604010',font:{size:9,family:'Share Tech Mono'}},grid:{color:'rgba(150,100,20,.07)'}},
-        x:{ticks:{color:'#604010',maxTicksLimit:10,font:{size:7,family:'Share Tech Mono'}},grid:{display: false}}
+        x:{ticks:{color:'#604010',maxTicksLimit:10,font:{size:7,family:'Share Tech Mono'}},grid:{color:'rgba(150,100,20,.04)'}}
       },
       plugins:{legend:{display:false},tooltip:{backgroundColor:'rgba(6,4,0,.95)',callbacks:{label:c=>label+': '+c.parsed.y}}}
     }
@@ -1364,8 +1472,7 @@ if(P8S.length>=8){
       pointBorderWidth:2,tension:0.3,fill:{target:'origin',above:'rgba(245,200,80,.07)',below:'rgba(245,200,80,.03)'}
     }]},
     options:{...pathOpts,scales:{
-      y:{min:3,max:18,ticks:{stepSize:3,color:'#806020',font:{size:10,family:'Share Tech Mono'}},grid:{color:'rgba(150,100,20,.10)'},
-        afterFit(a){a.width=36;}},
+      y:{min:3,max:18,ticks:{stepSize:3,color:'#806020',font:{size:10,family:'Share Tech Mono'}},grid:{color:'rgba(150,100,20,.10)'},afterFit(a){a.width=36;}},
       x:{ticks:{color:'#806020',font:{size:9,family:'Share Tech Mono'}},grid:{color:'rgba(150,100,20,.07)'}}
     },plugins:{...pathOpts.plugins,
       annotation:{annotations:{
@@ -1378,16 +1485,12 @@ if(P8S.length>=8){
 
   new Chart(document.getElementById('path8DiceChart'),{type:'line',
     data:{labels:P8L,datasets:[
-      {label:'D1',data:P8D1,borderColor:'rgba(245,166,66,.9)',borderWidth:2,pointRadius:P8D1.map((_,i)=>i===P8D1.length-1?8:5),
-        pointBackgroundColor:'rgba(245,166,66,.8)',pointBorderColor:'#f5a642',pointBorderWidth:1.5,tension:0.3,fill:false},
-      {label:'D2',data:P8D2,borderColor:'rgba(66,200,245,.9)',borderWidth:2,pointRadius:P8D2.map((_,i)=>i===P8D2.length-1?8:5),
-        pointBackgroundColor:'rgba(66,200,245,.8)',pointBorderColor:'#42c8f5',pointBorderWidth:1.5,tension:0.3,fill:false},
-      {label:'D3',data:P8D3,borderColor:'rgba(160,245,66,.9)',borderWidth:2,pointRadius:P8D3.map((_,i)=>i===P8D3.length-1?8:5),
-        pointBackgroundColor:'rgba(160,245,66,.8)',pointBorderColor:'#a0f542',pointBorderWidth:1.5,tension:0.3,fill:false},
+      {label:'D1',data:P8D1,borderColor:'rgba(245,166,66,.9)',borderWidth:2,pointRadius:P8D1.map((_,i)=>i===P8D1.length-1?8:5),pointBackgroundColor:'rgba(245,166,66,.8)',pointBorderColor:'#f5a642',pointBorderWidth:1.5,tension:0.3,fill:false},
+      {label:'D2',data:P8D2,borderColor:'rgba(66,200,245,.9)',borderWidth:2,pointRadius:P8D2.map((_,i)=>i===P8D2.length-1?8:5),pointBackgroundColor:'rgba(66,200,245,.8)',pointBorderColor:'#42c8f5',pointBorderWidth:1.5,tension:0.3,fill:false},
+      {label:'D3',data:P8D3,borderColor:'rgba(160,245,66,.9)',borderWidth:2,pointRadius:P8D3.map((_,i)=>i===P8D3.length-1?8:5),pointBackgroundColor:'rgba(160,245,66,.8)',pointBorderColor:'#a0f542',pointBorderWidth:1.5,tension:0.3,fill:false},
     ]},
     options:{...pathOpts,scales:{
-      y:{min:0.5,max:6.5,ticks:{stepSize:1,color:'#806020',font:{size:10,family:'Share Tech Mono'}},grid:{color:'rgba(150,100,20,.10)'},
-        afterFit(a){a.width=36;}},
+      y:{min:0.5,max:6.5,ticks:{stepSize:1,color:'#806020',font:{size:10,family:'Share Tech Mono'}},grid:{color:'rgba(150,100,20,.10)'},afterFit(a){a.width=36;}},
       x:{ticks:{color:'#806020',font:{size:9,family:'Share Tech Mono'}},grid:{color:'rgba(150,100,20,.07)'}}
     },plugins:{...pathOpts.plugins,
       annotation:{annotations:{mid:{type:'line',scaleID:'y',value:3.5,borderColor:'rgba(255,255,255,.08)',borderWidth:1,borderDash:[4,4]}}}
@@ -1435,40 +1538,13 @@ http.createServer(async (req, res) => {
       ket_qua_hien:h.type==="T"?"Tài":"Xỉu",
       phien_du_doan:String(Number(h.phien)+1),
       du_doan:p.nextDisplay, do_tin_cay:p.confDisplay,
+      mode:p.mode,
       consensus_pct:Math.round((p.ratio||0)*100)+"%",
       signals_T:p.cntT, signals_X:p.cntX,
       backtest_wr:p.backtest?.wr??null,
       signal_count:p.signalCount,
       muted_algos:p.mutedAlgos.map(m=>m.name),
-      ver:"v15"
-    }));return;
-  }
-
-  if (url.pathname==="/predict/detail") {
-    if (!history.length){noData();return;}
-    const p=predict(history);
-    res.writeHead(200);
-    res.end(JSON.stringify({
-      du_doan:p.nextDisplay, do_tin_cay:p.confDisplay,
-      consensus:p.ratio, cntT:p.cntT, cntX:p.cntX,
-      backtest:p.backtest, signals:p.signals,
-      streak:p.streak, path:p.path,
-      muted_algos:p.mutedAlgos,
-      chart_db:chartDB.length, dice_db:DICE_DB.map(d=>d.length),
-      ver:"v15"
-    }));return;
-  }
-
-  if (url.pathname==="/sunlon") {
-    if (!history.length){noData();return;}
-    const h=history[0],p=predict(history);
-    const pattern=history.slice(0,30).map(x=>x.type).reverse().join("");
-    res.writeHead(200);
-    res.end(JSON.stringify({
-      phien_hien_tai:Number(h.phien),ket_qua:h.type==="T"?"Tai":"Xiu",
-      xuc_xac:h.dice,phien_du_doan:Number(h.phien)+1,
-      du_doan:p.next==="T"?"Tai":"Xiu",do_tin_cay:p.confDisplay,
-      pattern,id:"@sewdangcap"
+      ver:"v14"
     }));return;
   }
 
@@ -1499,22 +1575,20 @@ http.createServer(async (req, res) => {
   res.writeHead(404);
   res.end(JSON.stringify({
     loi:"Không tìm thấy",
-    endpoints:["/","/predict","/predict/detail","/history","/bando","/sunlon","/algo/status","/debug"],
-    ver:"v15"
+    endpoints:["/","/predict","/history","/bando","/algo/status","/debug"],
+    ver:"v14"
   }));
 
 }).listen(PORT, ()=>{
-  console.log(`✅  minhsang — SOI CẦU v15.0 — Exponential Dynamic Weighting — port ${PORT}`);
-  console.log(`    Dashboard   : http://localhost:${PORT}/bando`);
-  console.log(`    API         : http://localhost:${PORT}/predict`);
-  console.log(`    Algo Status : http://localhost:${PORT}/algo/status`);
-  console.log(`\n    Architecture:`);
-  console.log(`    ┌─ Rolling Window: ${ROLL_WINDOW}p (Bắt cầu siêu tốc)`);
-  console.log(`    ├─ Exponential Weighting: Trọng số động x3 cho thuật toán form cao`);
-  console.log(`    ├─ Adaptive Mute: Tự động khóa thuật toán nếu WR < ${MUTE_WR*100}%`);
-  console.log(`    ├─ Strict Consensus: Bỏ qua (Luôn luôn dự đoán)`);
-  console.log(`    ├─ Ngưỡng: WR≥${MIN_WR*100}%, N≥${MIN_N}`);
-  console.log(`    └─ UI Upgrade: Tension Chart, Gradient Đổ Bóng, Neon Color`);
+  console.log(`✅  SicBo v14.0 — Always-Predict + Relaxed Thresholds — port ${PORT}`);
+  console.log(`    /bando  /predict  /algo/status`);
+  console.log(`\n    Thay đổi v14:`);
+  console.log(`    ├─ MIN_AGREE: 3→2  MIN_WR: 55%→52%  MIN_N: 15→8`);
+  console.log(`    ├─ MUTE_WR: 40%→35%  RATIO_MIN: 58%→52%`);
+  console.log(`    ├─ Fallback ensemble: luôn ra dự đoán kể cả ít signal`);
+  console.log(`    ├─ Thêm Pattern4, LastNRatio, TripleDice (3 algo mới)`);
+  console.log(`    ├─ ChartW: 10→8  DiceW: 8→6  (match dễ hơn)`);
+  console.log(`    └─ Mode badge: "strong" / "fallback" / "tiebreak"`);
   syncHistory();
   setInterval(syncHistory, 12000);
 });
