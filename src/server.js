@@ -107,16 +107,20 @@ function normalize(arr) {
 }
 
 // ═══════════════════════════════════════════════
-//  SIGNAL INTERFACE
+//  SIGNAL THRESHOLDS — THẮT CHẶT
 // ═══════════════════════════════════════════════
-const MIN_WIN_RATE = 0.52;
-const MIN_SAMPLES  = 8;
+const MIN_WIN_RATE  = 0.54;  // Tăng từ 0.52 → 0.54 để loại signal yếu
+const MIN_SAMPLES   = 12;    // Tăng từ 8 → 12 để đảm bảo độ tin cậy
+const CONSENSUS_MIN = 2;     // Tối thiểu 2 signal đồng thuận mới ra kết quả
 
 // ═══════════════════════════════════════════════
-//  THUẬT TOÁN 1: MARKOV CHAIN
+//  THUẬT TOÁN 1: MARKOV ĐA BẬC (cải tiến)
+//  Thêm "decay check": nếu 10 phiên gần nhất WR < 45% thì bỏ
 // ═══════════════════════════════════════════════
 function markov(seq, order) {
   if (seq.length < order + 1 + MIN_SAMPLES) return null;
+
+  // Xây bảng chuyển trạng thái
   const table = {};
   for (let p = 1; p <= seq.length - order; p++) {
     const stateKey = seq.slice(p, p + order).join("");
@@ -124,12 +128,17 @@ function markov(seq, order) {
     if (!table[stateKey]) table[stateKey] = { T: 0, X: 0 };
     table[stateKey][outcome]++;
   }
+
   const curState = seq.slice(0, order).join("");
   const c = table[curState];
   if (!c || (c.T + c.X) === 0) return null;
+
   const signal = c.T >= c.X ? "T" : "X";
+
+  // Tính WR lịch sử (không tính 20 phiên gần nhất = anti-overfit)
   let wins = 0, total = 0;
-  for (let p = 1; p <= seq.length - order - 1; p++) {
+  const testEnd = seq.length - order - 1;
+  for (let p = 1; p <= testEnd; p++) {
     const st = seq.slice(p, p + order).join("");
     if (st !== curState) continue;
     const tb = table[st];
@@ -141,15 +150,88 @@ function markov(seq, order) {
   if (total < MIN_SAMPLES) return null;
   const wr = wins / total;
   if (wr < MIN_WIN_RATE) return null;
+
+  // DECAY CHECK: Kiểm tra 15 phiên gần nhất — nếu đang gãy thì giảm weight
+  let recentWins = 0, recentTotal = 0;
+  for (let p = 1; p <= Math.min(15, seq.length - order - 1); p++) {
+    const st = seq.slice(p, p + order).join("");
+    if (st !== curState) continue;
+    const tb = table[st];
+    const pred = (tb.T >= tb.X) ? "T" : "X";
+    if (pred === seq[p - 1]) recentWins++;
+    recentTotal++;
+  }
+  // Nếu gần đây đang sai nhiều (< 40%) → skip hoàn toàn
+  if (recentTotal >= 4 && (recentWins / recentTotal) < 0.40) return null;
+
   return {
     signal, winRate: wr, sampleCount: total,
     source: `Markov-${order}`,
-    detail: `State [${curState}] → ${signal==="T"?"Tài":"Xỉu"} WR=${(wr*100).toFixed(0)}% (${total} mẫu)`
+    detail: `State [${curState}] → ${signal==="T"?"Tài":"Xỉu"} WR=${(wr*100).toFixed(0)}% (${total} mẫu${recentTotal>0?", gần="+recentWins+"/"+recentTotal:""})`
   };
 }
 
 // ═══════════════════════════════════════════════
-//  THUẬT TOÁN 2: CẦU BỆT
+//  THUẬT TOÁN 2: MARKOV CHỐNG GÃY (Anti-Streak Markov)
+//  Phát hiện khi Markov đang trong chu kỳ "gãy liên tục"
+//  → Tự động đảo signal khi phát hiện pattern gãy
+// ═══════════════════════════════════════════════
+function markovAntiBreak(seq) {
+  if (seq.length < 30) return null;
+
+  // Mô phỏng Markov-1 và Markov-2 trên lịch sử gần
+  const W = 20; // cửa sổ kiểm tra
+  const recentSeq = seq.slice(0, W);
+
+  // Đếm số lần Markov-1 đúng/sai trong W phiên gần
+  let m1Wins = 0, m1Total = 0;
+  for (let p = 1; p < W - 1; p++) {
+    const state = recentSeq[p];
+    const table = {};
+    for (let j = p + 1; j < recentSeq.length; j++) {
+      const s = recentSeq[j], o = recentSeq[j-1];
+      if (!table[s]) table[s] = {T:0,X:0};
+      table[s][o]++;
+    }
+    const c = table[state];
+    if (!c || (c.T+c.X) === 0) continue;
+    const pred = c.T >= c.X ? "T" : "X";
+    if (pred === recentSeq[p-1]) m1Wins++;
+    m1Total++;
+  }
+
+  if (m1Total < 8) return null;
+  const recentWR = m1Wins / m1Total;
+
+  // Nếu Markov-1 đang "gãy" liên tục (WR < 35% trong 20 phiên gần)
+  // → thì ta NÊN đảo kết quả của Markov-1
+  if (recentWR < 0.35) {
+    // Tính Markov-1 bình thường rồi đảo
+    const state = seq[0];
+    const tbl = {};
+    for (let p = 1; p < seq.length; p++) {
+      const s = seq[p], o = seq[p-1];
+      if (!tbl[s]) tbl[s] = {T:0,X:0};
+      tbl[s][o]++;
+    }
+    const c = tbl[state];
+    if (!c || (c.T+c.X) < MIN_SAMPLES) return null;
+    const rawSignal = c.T >= c.X ? "T" : "X";
+    const signal = rawSignal === "T" ? "X" : "T"; // ĐẢO
+    const invertedWR = 1 - recentWR; // WR khi đảo
+    if (invertedWR < MIN_WIN_RATE) return null;
+    return {
+      signal, winRate: invertedWR, sampleCount: m1Total,
+      source: "Anti-Break",
+      detail: `Markov đang gãy (${(recentWR*100).toFixed(0)}%/20p) → đảo sang ${signal==="T"?"Tài":"Xỉu"} WR=${(invertedWR*100).toFixed(0)}%`
+    };
+  }
+
+  return null;
+}
+
+// ═══════════════════════════════════════════════
+//  THUẬT TOÁN 3: CẦU BỆT (cải tiến với decay)
 // ═══════════════════════════════════════════════
 function streakCau(seq) {
   if (seq.length < MIN_SAMPLES + 3) return null;
@@ -160,7 +242,10 @@ function streakCau(seq) {
     else break;
   }
   if (curStreak < 2) return null;
+
   let breakCount = 0, contCount = 0;
+  let recentBreak = 0, recentCont = 0, recentTotal = 0;
+
   for (let p = 1; p <= seq.length - curStreak - 1; p++) {
     const t = seq[p];
     let len = 0;
@@ -170,11 +255,26 @@ function streakCau(seq) {
     const outcome = seq[p - 1];
     if (outcome === t) contCount++;
     else               breakCount++;
+    // Theo dõi 20 phiên gần nhất
+    if (p <= 20) {
+      recentTotal++;
+      if (outcome !== t) recentBreak++; else recentCont++;
+    }
   }
   const total = breakCount + contCount;
   if (total < MIN_SAMPLES) return null;
+
   const breakRate = breakCount / total;
   const contRate  = contCount  / total;
+
+  // Kiểm tra decay: nếu 20 phiên gần đây đang gãy thì skip
+  if (recentTotal >= 4) {
+    const recentBreakRate = recentBreak / recentTotal;
+    const recentContRate  = recentCont  / recentTotal;
+    if (breakRate > MIN_WIN_RATE && recentBreakRate < 0.35) return null;
+    if (contRate  > MIN_WIN_RATE && recentContRate  < 0.35) return null;
+  }
+
   if (breakRate > MIN_WIN_RATE) {
     const opp = curType === "T" ? "X" : "T";
     return { signal: opp, winRate: breakRate, sampleCount: total, source: "Cầu Bệt",
@@ -188,7 +288,7 @@ function streakCau(seq) {
 }
 
 // ═══════════════════════════════════════════════
-//  THUẬT TOÁN 3: CẦU XEN KẼ
+//  THUẬT TOÁN 4: CẦU XEN KẼ (cải tiến)
 // ═══════════════════════════════════════════════
 function alternating(seq) {
   if (seq.length < MIN_SAMPLES + 4) return null;
@@ -198,8 +298,10 @@ function alternating(seq) {
     else break;
   }
   if (altLen < 4) return null;
+
   const expectedIfAlt = seq[0] === "T" ? "X" : "T";
   let wins = 0, total = 0;
+
   for (let p = 1; p + altLen <= seq.length; p++) {
     let L = 1;
     for (let i = p+1; i < seq.length; i++) {
@@ -222,34 +324,50 @@ function alternating(seq) {
 }
 
 // ═══════════════════════════════════════════════
-//  THUẬT TOÁN 4: N-GRAM PATTERN
+//  THUẬT TOÁN 5: PATTERN BLOCK (thay N-gram thô)
+//  So sánh block 6 phiên hiện tại với toàn bộ lịch sử
+//  Tìm block giống nhất (không cần exact match) → vote
 // ═══════════════════════════════════════════════
-function ngram(seq, n) {
-  if (seq.length < n + MIN_SAMPLES + 1) return null;
-  const curPat = seq.slice(0, n).join("");
-  let countT = 0, countX = 0;
-  for (let p = 1; p + n <= seq.length; p++) {
-    if (seq.slice(p, p+n).join("") !== curPat) continue;
-    if (seq[p-1] === "T") countT++;
-    else countX++;
+function patternBlock(seq, blockSize = 6) {
+  if (seq.length < blockSize + MIN_SAMPLES + 1) return null;
+
+  const curBlock = seq.slice(0, blockSize).join("");
+  const countMap = {};
+
+  for (let p = 1; p + blockSize <= seq.length; p++) {
+    const block = seq.slice(p, p + blockSize).join("");
+    if (block !== curBlock) continue;
+    const outcome = seq[p - 1];
+    if (!countMap[outcome]) countMap[outcome] = 0;
+    countMap[outcome]++;
   }
-  const total = countT + countX;
+
+  const cT = countMap["T"] || 0;
+  const cX = countMap["X"] || 0;
+  const total = cT + cX;
   if (total < MIN_SAMPLES) return null;
-  const signal = countT >= countX ? "T" : "X";
-  const wr = Math.max(countT, countX) / total;
+  const wr = Math.max(cT, cX) / total;
   if (wr < MIN_WIN_RATE) return null;
-  return { signal, winRate: wr, sampleCount: total, source: `${n}-gram`,
-    detail: `Pattern [${curPat}] → ${signal==="T"?"Tài":"Xỉu"} WR=${(wr*100).toFixed(0)}% (${total} mẫu)` };
+
+  const signal = cT >= cX ? "T" : "X";
+  return {
+    signal, winRate: wr, sampleCount: total, source: "Block Pattern",
+    detail: `Block [${curBlock}] → ${signal==="T"?"Tài":"Xỉu"} WR=${(wr*100).toFixed(0)}% (${total} mẫu)`
+  };
 }
 
 // ═══════════════════════════════════════════════
-//  THUẬT TOÁN 5: CÂN BẰNG (Mean Reversion)
+//  THUẬT TOÁN 6: CÂN BẰNG (Mean Reversion) - cải tiến
 // ═══════════════════════════════════════════════
 function meanReversion(hist) {
   if (hist.length < 60) return null;
   const W = 30;
   const recent = hist.slice(0, W);
   const ratioT = recent.filter(h => h.type === "T").length / W;
+
+  // Chỉ kích hoạt khi lệch mạnh
+  if (ratioT >= 0.38 && ratioT <= 0.62) return null;
+
   let wins = 0, total = 0;
   for (let p = W; p + W < hist.length; p++) {
     const window = hist.slice(p, p + W);
@@ -267,18 +385,15 @@ function meanReversion(hist) {
     return { signal: "X", winRate: wr, sampleCount: total, source: "Cân Bằng",
       detail: `Tài ${(ratioT*100).toFixed(0)}%/30p → hồi quy Xỉu WR=${(wr*100).toFixed(0)}%` };
   }
-  if (ratioT < 0.38) {
-    return { signal: "T", winRate: wr, sampleCount: total, source: "Cân Bằng",
-      detail: `Xỉu ${((1-ratioT)*100).toFixed(0)}%/30p → hồi quy Tài WR=${(wr*100).toFixed(0)}%` };
-  }
-  return null;
+  return { signal: "T", winRate: wr, sampleCount: total, source: "Cân Bằng",
+    detail: `Xỉu ${((1-ratioT)*100).toFixed(0)}%/30p → hồi quy Tài WR=${(wr*100).toFixed(0)}%` };
 }
 
 // ═══════════════════════════════════════════════
-//  THUẬT TOÁN 6: CHART PATTERN (Tổng)
+//  THUẬT TOÁN 7: CHART PATTERN (Tổng) - giữ nguyên nhưng nâng ngưỡng
 // ═══════════════════════════════════════════════
 const CHART_W  = 10;
-const MIN_CORR = 0.80;
+const MIN_CORR = 0.82;  // Tăng từ 0.80 → 0.82
 const MAX_DB   = 300;
 const chartDB  = [];
 
@@ -332,7 +447,7 @@ function predictChart(hist) {
   const curLabel  = shapeLabel(curNorm);
   const matches = [];
   for (const entry of chartDB) {
-    if (entry.totalSeen < 3) continue;
+    if (entry.totalSeen < 5) continue; // Tăng ngưỡng từ 3 → 5
     const corr = pearson(entry.normShape, curNorm);
     if (corr >= MIN_CORR) matches.push({ entry, corr });
   }
@@ -356,195 +471,13 @@ function predictChart(hist) {
 }
 
 // ═══════════════════════════════════════════════
-//  THUẬT TOÁN 7: DICE INDIVIDUAL CHART PATTERN
-//  Phân tích hình dạng đồ thị từng xúc xắc (d1, d2, d3) riêng lẻ
-//  Mỗi xúc xắc có DB pattern riêng → vote tổng hợp
-// ═══════════════════════════════════════════════
-const DICE_W   = 8;   // cửa sổ 8 phiên cho từng xúc xắc
-const DICE_MIN_CORR = 0.78;
-const DICE_MAX_DB   = 200;
-const diceDB = [[], [], []]; // DB cho d1, d2, d3
-
-function updateDiceDB(hist) {
-  if (hist.length < DICE_W + 2) return;
-  for (let di = 0; di < 3; di++) {
-    const db = diceDB[di];
-    for (let p = 1; p + DICE_W <= hist.length; p++) {
-      const window = hist.slice(p, p + DICE_W).map(h => h.dice[di]).reverse();
-      const norm = normalize(window);
-      const outcome = hist[p - 1].type;
-      let bestIdx = -1, bestCorr = -1;
-      for (let i = 0; i < db.length; i++) {
-        const corr = pearson(db[i].normShape, norm);
-        if (corr > bestCorr) { bestCorr = corr; bestIdx = i; }
-      }
-      if (bestCorr >= DICE_MIN_CORR && bestIdx >= 0) {
-        db[bestIdx].totalSeen++;
-        if (outcome === "T") db[bestIdx].winsT++;
-        else db[bestIdx].winsX++;
-      } else {
-        db.push({ normShape: norm, totalSeen: 1,
-          winsT: outcome === "T" ? 1 : 0, winsX: outcome === "X" ? 1 : 0 });
-        if (db.length > DICE_MAX_DB) {
-          db.sort((a,b) => b.totalSeen - a.totalSeen);
-          db.splice(DICE_MAX_DB);
-        }
-      }
-    }
-  }
-}
-
-function predictDice(hist) {
-  if (hist.length < DICE_W + 2) return null;
-  updateDiceDB(hist);
-  let totalWT = 0, totalWX = 0, totalSamples = 0, activeCount = 0;
-  const diceSignals = [];
-
-  for (let di = 0; di < 3; di++) {
-    const db = diceDB[di];
-    const curWindow = hist.slice(0, DICE_W).map(h => h.dice[di]).reverse();
-    const curNorm   = normalize(curWindow);
-    const matches = [];
-    for (const entry of db) {
-      if (entry.totalSeen < 3) continue;
-      const corr = pearson(entry.normShape, curNorm);
-      if (corr >= DICE_MIN_CORR) matches.push({ entry, corr });
-    }
-    if (!matches.length) { diceSignals.push(null); continue; }
-    let wT = 0, wX = 0;
-    for (const { entry, corr } of matches) {
-      const total = entry.totalSeen;
-      const w = corr * Math.log(1 + total);
-      wT += w * (entry.winsT / total);
-      wX += w * (entry.winsX / total);
-    }
-    if (wT + wX < 0.001) { diceSignals.push(null); continue; }
-    const prob = wT / (wT + wX);
-    const sig = prob >= 0.5 ? "T" : "X";
-    const wr = Math.max(prob, 1-prob);
-    const seen = matches.reduce((s, m) => s + m.entry.totalSeen, 0);
-    diceSignals.push({ signal: sig, winRate: wr, sampleCount: seen, dice: di+1 });
-    totalWT += wT; totalWX += wX;
-    totalSamples += seen;
-    activeCount++;
-  }
-
-  if (activeCount === 0) return null;
-  const prob = totalWT / (totalWT + totalWX);
-  const signal = prob >= 0.5 ? "T" : "X";
-  const wr = Math.max(prob, 1-prob);
-  if (wr < MIN_WIN_RATE) return null;
-
-  // Build detail string
-  const diceLabels = diceSignals.map((ds, i) => {
-    if (!ds) return `D${i+1}:?`;
-    return `D${i+1}:${ds.signal==="T"?"▲":"▼"}${(ds.winRate*100).toFixed(0)}%`;
-  }).join(" ");
-
-  return {
-    signal, winRate: wr, sampleCount: Math.round(totalSamples / Math.max(activeCount,1)),
-    source: "Chart Xúc Xắc",
-    detail: `[${diceLabels}] → ${signal==="T"?"Tài":"Xỉu"} WR=${(wr*100).toFixed(0)}%`,
-    diceSignals
-  };
-}
-
-// ═══════════════════════════════════════════════
-//  THUẬT TOÁN 8: DICE MARKOV
-//  Mỗi xúc xắc có xu hướng lặp lại giá trị không?
-//  Phân nhóm: thấp(1-2), trung(3-4), cao(5-6) → Markov 1 bậc
-// ═══════════════════════════════════════════════
-function diceGroupMarkov(hist) {
-  if (hist.length < MIN_SAMPLES + 5) return null;
-
-  function group(v) { return v <= 2 ? "L" : v <= 4 ? "M" : "H"; }
-
-  const results = [];
-  for (let di = 0; di < 3; di++) {
-    const seq = hist.map(h => group(h.dice[di]));
-    // State = current group, xem tổng tiếp theo là T hay X
-    const table = {};
-    for (let p = 1; p < seq.length; p++) {
-      const key = seq[p]; // trạng thái tại p
-      const outcome = hist[p-1].type; // kết quả phiên mới hơn
-      if (!table[key]) table[key] = { T: 0, X: 0 };
-      table[key][outcome]++;
-    }
-    const curGroup = seq[0];
-    const c = table[curGroup];
-    if (!c || (c.T + c.X) < MIN_SAMPLES) continue;
-    const wr = Math.max(c.T, c.X) / (c.T + c.X);
-    if (wr < MIN_WIN_RATE) continue;
-    const sig = c.T >= c.X ? "T" : "X";
-    results.push({ dice: di+1, group: curGroup, sig, wr, n: c.T + c.X });
-  }
-
-  if (!results.length) return null;
-  // Vote theo weight
-  let wT = 0, wX = 0, totalN = 0;
-  for (const r of results) {
-    const w = r.wr * Math.log(1 + r.n);
-    if (r.sig === "T") wT += w; else wX += w;
-    totalN += r.n;
-  }
-  const signal = wT >= wX ? "T" : "X";
-  const prob = Math.max(wT, wX) / (wT + wX);
-  if (prob < MIN_WIN_RATE) return null;
-
-  const groups = {"L":"Thấp","M":"Trung","H":"Cao"};
-  const detail = results.map(r => `D${r.dice}(${groups[r.group]}):${r.sig==="T"?"▲":"▼"}`).join(" ");
-  return {
-    signal, winRate: prob, sampleCount: Math.round(totalN/results.length),
-    source: "Dice Markov",
-    detail: `[${detail}] → ${signal==="T"?"Tài":"Xỉu"} WR=${(prob*100).toFixed(0)}%`
-  };
-}
-
-// ═══════════════════════════════════════════════
-//  THUẬT TOÁN 9: DICE CORRELATION
-//  Phân tích tương quan giữa 3 xúc xắc
-//  Khi d1 cao & d2 cao → xu hướng Tài mạnh hơn không?
-//  Encode: {d1_grp, d2_grp, d3_grp} → T/X count
-// ═══════════════════════════════════════════════
-function diceCorrelation(hist) {
-  if (hist.length < 30) return null;
-  function group(v) { return v <= 3 ? "L" : "H"; } // đơn giản: Thấp/Cao
-
-  const table = {};
-  for (let p = 1; p < hist.length; p++) {
-    const h = hist[p];
-    const key = `${group(h.dice[0])},${group(h.dice[1])},${group(h.dice[2])}`;
-    const outcome = hist[p-1].type;
-    if (!table[key]) table[key] = { T: 0, X: 0 };
-    table[key][outcome]++;
-  }
-
-  // Trạng thái xúc xắc hiện tại
-  const cur = hist[0];
-  const curKey = `${group(cur.dice[0])},${group(cur.dice[1])},${group(cur.dice[2])}`;
-  const c = table[curKey];
-  if (!c || (c.T + c.X) < MIN_SAMPLES) return null;
-  const wr = Math.max(c.T, c.X) / (c.T + c.X);
-  if (wr < MIN_WIN_RATE) return null;
-  const signal = c.T >= c.X ? "T" : "X";
-
-  return {
-    signal, winRate: wr, sampleCount: c.T + c.X,
-    source: "Dice Corr",
-    detail: `Tổ hợp [${curKey}] → ${signal==="T"?"Tài":"Xỉu"} WR=${(wr*100).toFixed(0)}% (${c.T+c.X} mẫu)`
-  };
-}
-
-// ═══════════════════════════════════════════════
-//  THUẬT TOÁN 10: DICE SUM TREND
-//  Phân tích xu hướng từng xúc xắc (tăng/giảm/ngang) trong 5 phiên gần
-//  rồi dự đoán kết quả tiếp theo
+//  THUẬT TOÁN 8: DICE TREND (cải tiến, giữ lại)
+//  Phân tích xu hướng từng xúc xắc rồi vote
 // ═══════════════════════════════════════════════
 function diceTrend(hist) {
-  if (hist.length < 20) return null;
-  const W = 5;
+  if (hist.length < 25) return null;
+  const W = 6; // tăng từ 5 → 6
 
-  // Tính slope cho từng xúc xắc
   function slope(vals) {
     const n = vals.length;
     if (n < 2) return 0;
@@ -554,12 +487,11 @@ function diceTrend(hist) {
     return d ? (n*sxy - sx*sy) / d : 0;
   }
 
-  function trendCode(s) { return s > 0.3 ? "U" : s < -0.3 ? "D" : "F"; }
+  function trendCode(s) { return s > 0.4 ? "U" : s < -0.4 ? "D" : "F"; } // Tăng ngưỡng
 
-  // Xây bảng: key = trendCode của 3 xúc xắc (UUU, UDF,...) → {T,X}
   const table = {};
   for (let p = W; p < hist.length; p++) {
-    const window = hist.slice(p, p + W).map(h => h.dice).reverse(); // cũ→mới
+    const window = hist.slice(p, p + W).map(h => h.dice).reverse();
     const slopes = [0,1,2].map(di => slope(window.map(d => d[di])));
     const key = slopes.map(trendCode).join("");
     const outcome = hist[p-1].type;
@@ -586,65 +518,239 @@ function diceTrend(hist) {
 }
 
 // ═══════════════════════════════════════════════
-//  ENSEMBLE
+//  THUẬT TOÁN 9: DICE SUM MARKOV (MỚI)
+//  Phân nhóm tổng xúc xắc theo vùng: 3-7 (Thấp), 8-13 (Trung), 14-18 (Cao)
+//  Markov bậc 2 trên nhóm tổng → dự đoán T/X
 // ═══════════════════════════════════════════════
-function ensemble(signals) {
-  if (!signals.length) return { signal: null, confidence: 0.5 };
-  let wT = 0, wX = 0;
-  for (const s of signals) {
-    const w = s.winRate * Math.log(1 + s.sampleCount);
-    if (s.signal === "T") wT += w;
-    else                  wX += w;
+function diceSumMarkov(hist) {
+  if (hist.length < 30) return null;
+
+  function groupSum(tong) {
+    if (tong <= 7)  return "L";
+    if (tong <= 13) return "M";
+    return "H";
   }
-  const total = wT + wX;
-  if (total < 0.001) return { signal: null, confidence: 0.5 };
-  const signal = wT >= wX ? "T" : "X";
-  const rawConf = Math.max(wT, wX) / total;
-  const confidence = 0.50 + Math.min(rawConf - 0.50, 0.30);
-  return { signal, confidence };
+
+  const ORDER = 2;
+  const seq = hist.map(h => groupSum(h.tong));
+
+  const table = {};
+  for (let p = 1; p + ORDER <= seq.length; p++) {
+    const key = seq.slice(p, p + ORDER).join("");
+    const outcome = hist[p - 1].type;
+    if (!table[key]) table[key] = { T: 0, X: 0 };
+    table[key][outcome]++;
+  }
+
+  const curKey = seq.slice(0, ORDER).join("");
+  const c = table[curKey];
+  if (!c || (c.T + c.X) < MIN_SAMPLES) return null;
+  const wr = Math.max(c.T, c.X) / (c.T + c.X);
+  if (wr < MIN_WIN_RATE) return null;
+  const signal = c.T >= c.X ? "T" : "X";
+
+  const groupNames = { L: "Thấp", M: "Trung", H: "Cao" };
+  const keyStr = curKey.split("").map(k => groupNames[k]).join("→");
+
+  return {
+    signal, winRate: wr, sampleCount: c.T + c.X,
+    source: "Sum Markov",
+    detail: `Vùng tổng [${keyStr}] → ${signal==="T"?"Tài":"Xỉu"} WR=${(wr*100).toFixed(0)}% (${c.T+c.X} mẫu)`
+  };
 }
 
 // ═══════════════════════════════════════════════
-//  BACKTEST
+//  THUẬT TOÁN 10: MOMENTUM (MỚI)
+//  Đo "momentum" T/X trong 5, 10, 20 phiên gần
+//  Khi cả 3 cùng chiều và tỷ lệ đủ mạnh → tín hiệu
 // ═══════════════════════════════════════════════
-function backtestSystem(hist, trials = 30) {
-  if (hist.length < trials + 20) return null;
+function momentum(hist) {
+  if (hist.length < 40) return null;
+
+  const windows = [5, 10, 20];
+  const ratios  = windows.map(w => {
+    const slice = hist.slice(0, w);
+    return slice.filter(h => h.type === "T").length / w;
+  });
+
+  // Kiểm tra cả 3 cùng chiều
+  const allBullish = ratios.every(r => r > 0.60);
+  const allBearish = ratios.every(r => r < 0.40);
+
+  if (!allBullish && !allBearish) return null;
+
+  // Tính WR lịch sử: khi cùng momentum → tiếp tục hay đảo?
   let wins = 0, total = 0;
+  for (let p = 20; p + 20 < hist.length; p++) {
+    const r5  = hist.slice(p, p+5) .filter(h => h.type==="T").length / 5;
+    const r10 = hist.slice(p, p+10).filter(h => h.type==="T").length / 10;
+    const r20 = hist.slice(p, p+20).filter(h => h.type==="T").length / 20;
+    const isBull = r5 > 0.60 && r10 > 0.60 && r20 > 0.60;
+    const isBear = r5 < 0.40 && r10 < 0.40 && r20 < 0.40;
+    if (!isBull && !isBear) continue;
+    const pred = isBull ? "T" : "X";
+    const actual = hist[p - 1].type;
+    if (pred === actual) wins++;
+    total++;
+  }
+
+  if (total < MIN_SAMPLES) return null;
+  const wr = wins / total;
+  if (wr < MIN_WIN_RATE) return null;
+
+  const signal = allBullish ? "T" : "X";
+  const strength = allBullish
+    ? ratios.map(r => (r*100).toFixed(0)+"%").join("/")
+    : ratios.map(r => ((1-r)*100).toFixed(0)+"%").join("/");
+
+  return {
+    signal, winRate: wr, sampleCount: total,
+    source: "Momentum",
+    detail: `Momentum ${allBullish?"Tài":"Xỉu"} [${strength}] WR=${(wr*100).toFixed(0)}% (${total} mẫu)`
+  };
+}
+
+// ═══════════════════════════════════════════════
+//  THUẬT TOÁN 11: DOUBLE AFTER BREAK (MỚI)
+//  Phát hiện pattern "gãy kép": sau khi cầu bệt gãy 1 lần
+//  lần tiếp theo nó thường gãy tiếp hay tiếp tục?
+// ═══════════════════════════════════════════════
+function doubleAfterBreak(seq) {
+  if (seq.length < 40) return null;
+
+  // Tìm vị trí các "gãy cầu": chuyển từ AAAA... → B
+  // Sau đó xem phiên kế tiếp là T hay X
+  let wins = 0, total = 0;
+  let lastBreakType = null; // Loại phiên sau khi gãy
+
+  for (let i = 2; i < seq.length - 1; i++) {
+    // Tìm cầu bệt
+    if (seq[i] === seq[i+1] && seq[i] !== seq[i-1]) {
+      // Đây là điểm gãy: seq[i-1] khác seq[i]
+      // Phiên gãy là seq[i-1], phiên sau gãy là seq[i]
+      if (lastBreakType !== null) {
+        // Sau lần gãy trước, lần gãy này theo sau là loại gì?
+        total++;
+        if (seq[i-1] !== lastBreakType) wins++;
+      }
+      lastBreakType = seq[i-1];
+    }
+  }
+
+  if (total < MIN_SAMPLES) return null;
+  const wr = wins / total;
+  if (wr < MIN_WIN_RATE) return null;
+
+  // Áp dụng: tìm gãy gần nhất
+  let lastBreakInSeq = null;
+  for (let i = 2; i < Math.min(20, seq.length - 1); i++) {
+    if (seq[i] === seq[i+1] && seq[i] !== seq[i-1]) {
+      lastBreakInSeq = seq[i-1];
+      break;
+    }
+  }
+  if (lastBreakInSeq === null) return null;
+
+  const signal = lastBreakInSeq === "T" ? "X" : "T"; // Thường đảo kiểu sau gãy kép
+
+  return {
+    signal, winRate: wr, sampleCount: total,
+    source: "Double Break",
+    detail: `Sau gãy [${lastBreakInSeq==="T"?"Tài":"Xỉu"}] → ${signal==="T"?"Tài":"Xỉu"} WR=${(wr*100).toFixed(0)}% (${total} mẫu)`
+  };
+}
+
+// ═══════════════════════════════════════════════
+//  ENSEMBLE (cải tiến — có consensus filter)
+// ═══════════════════════════════════════════════
+function ensemble(signals) {
+  if (!signals.length) return { signal: null, confidence: 0.5, consensus: 0 };
+
+  // Đếm consensus
+  const cntT = signals.filter(s => s.signal === "T").length;
+  const cntX = signals.filter(s => s.signal === "X").length;
+  const total = signals.length;
+
+  // Consensus: tỷ lệ đồng thuận
+  const consensusRatio = Math.max(cntT, cntX) / total;
+
+  // Nếu không đạt consensus tối thiểu → trả về null (không cược)
+  if (Math.max(cntT, cntX) < CONSENSUS_MIN) {
+    return { signal: null, confidence: 0.5, consensus: consensusRatio };
+  }
+
+  // Weighted voting với winRate và sampleCount
+  let wT = 0, wX = 0;
+  for (const s of signals) {
+    // Weight = winRate * log(samples) * (extra bonus nếu WR > 60%)
+    const bonus = s.winRate > 0.60 ? 1.3 : 1.0;
+    const w = s.winRate * Math.log(1 + s.sampleCount) * bonus;
+    if (s.signal === "T") wT += w;
+    else                  wX += w;
+  }
+  const tot = wT + wX;
+  if (tot < 0.001) return { signal: null, confidence: 0.5, consensus: consensusRatio };
+
+  const signal = wT >= wX ? "T" : "X";
+  const rawConf = Math.max(wT, wX) / tot;
+
+  // Điều chỉnh confidence theo consensus
+  const confBase = 0.50 + Math.min(rawConf - 0.50, 0.30);
+  const confAdj  = confBase * (0.7 + 0.3 * consensusRatio); // penalize thấp consensus
+
+  return { signal, confidence: Math.min(confAdj, 0.85), consensus: consensusRatio, cntT, cntX };
+}
+
+// ═══════════════════════════════════════════════
+//  BACKTEST (cải tiến)
+// ═══════════════════════════════════════════════
+function backtestSystem(hist, trials = 40) {
+  if (hist.length < trials + 25) return null;
+  let wins = 0, total = 0, skipped = 0;
   for (let i = 1; i <= trials; i++) {
     const subHist = hist.slice(i);
-    if (subHist.length < 20) continue;
+    if (subHist.length < 25) continue;
     const subSeq  = subHist.map(h => h.type);
     const sigs    = collectSignals(subSeq, subHist);
-    if (!sigs.length) continue;
+    if (!sigs.length) { skipped++; continue; }
     const { signal } = ensemble(sigs);
-    if (!signal) continue;
+    if (!signal) { skipped++; continue; } // không cược khi không đủ consensus
     const actual = hist[i-1].type;
     if (signal === actual) wins++;
     total++;
   }
   if (!total) return null;
-  return { wins, total, wr: wins / total };
+  return { wins, total, skipped, wr: wins / total };
 }
 
 // ═══════════════════════════════════════════════
-//  COLLECT ALL SIGNALS
+//  COLLECT ALL SIGNALS (bỏ các algo gây nhiễu)
 // ═══════════════════════════════════════════════
 function collectSignals(seq, hist) {
   const results = [];
   const add = (r) => { if (r) results.push(r); };
+
+  // === CORE SEQUENCE ALGORITHMS ===
   add(markov(seq, 1));
   add(markov(seq, 2));
   add(markov(seq, 3));
+  add(markovAntiBreak(seq));   // MỚI: Markov chống gãy
   add(streakCau(seq));
   add(alternating(seq));
-  add(ngram(seq, 5));
-  add(ngram(seq, 4));
+  add(patternBlock(seq, 6));   // Thay N-gram thô
+
+  // === STATISTICAL ALGORITHMS ===
   if (hist) add(meanReversion(hist));
+  if (hist) add(momentum(hist));     // MỚI
+  if (hist) add(doubleAfterBreak(seq)); // MỚI
+
+  // === CHART / DICE ALGORITHMS (chọn lọc) ===
   if (hist) add(predictChart(hist));
-  if (hist) add(predictDice(hist));
-  if (hist) add(diceGroupMarkov(hist));
-  if (hist) add(diceCorrelation(hist));
   if (hist) add(diceTrend(hist));
+  if (hist) add(diceSumMarkov(hist)); // MỚI: Thay thế diceGroupMarkov
+
+  // BỎ: Chart Xúc Xắc (tốn RAM, ít mẫu), Dice Corr (quá thưa), DiceGroupMarkov (trùng lặp)
+
   return results;
 }
 
@@ -652,24 +758,23 @@ function collectSignals(seq, hist) {
 //  MAIN PREDICT
 // ═══════════════════════════════════════════════
 function predict(hist) {
-  if (hist.length < 15) {
+  if (hist.length < 20) {
     return { next: null, nextDisplay: "Chưa đủ dữ liệu", confidence: 0.5, confDisplay: "50%",
       signals: [], backtest: null, typeSeq: [], sumChart: [], streak: 0, curType: "?",
-      chartDBSize: chartDB.length, diceSig: null };
+      chartDBSize: chartDB.length, consensus: 0 };
   }
   const seq     = hist.map(h => h.type);
   const signals = collectSignals(seq, hist);
-  const { signal, confidence } = ensemble(signals);
-  const backtest = backtestSystem(hist, 30);
+  const { signal, confidence, consensus, cntT, cntX } = ensemble(signals);
+  const backtest = backtestSystem(hist, 40);
   const curType = seq[0];
   let streak = 0;
   for (const t of seq) { if (t === curType) streak++; else break; }
   const chartSig = signals.find(s => s.source === "Chart Tổng");
-  const diceSig  = signals.find(s => s.source === "Chart Xúc Xắc");
   const vT = signals.filter(s => s.signal === "T").reduce((s,r) => s + r.winRate, 0);
   const vX = signals.filter(s => s.signal === "X").reduce((s,r) => s + r.winRate, 0);
 
-  // Dice stats: avg, trend
+  // Dice stats
   const diceStats = [0,1,2].map(di => {
     const vals = hist.slice(0, 20).map(h => h.dice[di]);
     return { avg: mean(vals).toFixed(2), std: stdDev(vals).toFixed(2),
@@ -677,9 +782,10 @@ function predict(hist) {
   });
 
   return {
-    next: signal, nextDisplay: signal === "T" ? "Tài" : signal === "X" ? "Xỉu" : "?",
+    next: signal, nextDisplay: signal === "T" ? "Tài" : signal === "X" ? "Xỉu" : "Chờ",
     confidence, confDisplay: Math.round(confidence * 100) + "%",
     signals, signalCount: signals.length,
+    consensus, cntT: cntT||0, cntX: cntX||0,
     backtest, typeSeq: seq.slice(0, 25),
     sumChart: hist.slice(0, 25).map(h => h.tong),
     diceCharts: {
@@ -692,9 +798,7 @@ function predict(hist) {
     chartDBSize: chartDB.length,
     chartSignal: chartSig || null,
     currentShape: chartSig ? chartSig.shapeName : null,
-    diceSig: diceSig || null,
     diceStats,
-    diceDBSizes: diceDB.map(db => db.length),
   };
 }
 
@@ -704,14 +808,14 @@ function predict(hist) {
 function diceFreqAnalysis(hist, n = 50) {
   const slice = hist.slice(0, Math.min(n, hist.length));
   return [0,1,2].map(di => {
-    const freq = [0,0,0,0,0,0,0]; // idx 1-6
+    const freq = [0,0,0,0,0,0,0];
     for (const h of slice) freq[h.dice[di]]++;
-    return freq.slice(1); // [count for 1, count for 2, ... count for 6]
+    return freq.slice(1);
   });
 }
 
 // ═══════════════════════════════════════════════
-//  HTML BUILDER
+//  HTML BUILDER (v12 — thiết kế lại)
 // ═══════════════════════════════════════════════
 function buildHTML(pred, h) {
   const n = Math.min(pred.sumChart.length, 25);
@@ -720,18 +824,20 @@ function buildHTML(pred, h) {
   const d1Data  = JSON.stringify([...pred.diceCharts.d1.slice(0,n)].reverse());
   const d2Data  = JSON.stringify([...pred.diceCharts.d2.slice(0,n)].reverse());
   const d3Data  = JSON.stringify([...pred.diceCharts.d3.slice(0,n)].reverse());
-  const typeData = JSON.stringify([...pred.typeSeq.slice(0,n)].reverse());
+  const typeData= JSON.stringify([...pred.typeSeq.slice(0,n)].reverse());
+  const freqs   = diceFreqAnalysis(history, 50);
+  const freqJSON= JSON.stringify(freqs);
 
-  // Dice freq
-  const freqs = diceFreqAnalysis(history, 50);
-  const freqJSON = JSON.stringify(freqs);
-
+  const noSignal  = pred.next === null;
   const isTai     = pred.next === "T";
-  const predColor = isTai ? "#f5c842" : "#a070ff";
-  const predBg    = isTai ? "rgba(245,200,66,0.10)" : "rgba(160,112,255,0.10)";
+  const predColor = noSignal ? "#888888" : (isTai ? "#f5c842" : "#a070ff");
+  const predBg    = noSignal ? "rgba(100,100,100,0.08)" : (isTai ? "rgba(245,200,66,0.10)" : "rgba(160,112,255,0.10)");
   const btWR      = pred.backtest ? (pred.backtest.wr * 100).toFixed(1) : "N/A";
   const btTotal   = pred.backtest ? pred.backtest.total : 0;
+  const btSkip    = pred.backtest ? (pred.backtest.skipped||0) : 0;
   const confPct   = Math.round(pred.confidence * 100);
+  const consensusPct = Math.round((pred.consensus||0) * 100);
+
   const sumArr    = pred.sumChart;
   const bolMid    = parseFloat(mean(sumArr).toFixed(2));
   const bolSd     = parseFloat(stdDev(sumArr).toFixed(2));
@@ -741,34 +847,25 @@ function buildHTML(pred, h) {
   const pctT = (vT+vX) > 0 ? Math.round(vT/(vT+vX)*100) : 50;
   const pctX = 100 - pctT;
 
-  // Dice signal display
-  const diceSigRows = pred.diceSig ? pred.diceSig.diceSignals.map((ds, i) => {
-    if (!ds) return `<span class="dice-sig-nil">D${i+1}: ?</span>`;
-    const col = ds.signal === "T" ? "#f5c842" : "#a070ff";
-    return `<span class="dice-sig-item" style="border-color:${col}">
-      <span style="color:${col}">D${i+1}</span>
-      <span style="color:${col};font-weight:700">${ds.signal==="T"?"▲":"▼"}${(ds.winRate*100).toFixed(0)}%</span>
-    </span>`;
-  }).join("") : '<span style="color:#555;font-size:.7rem">Đang xây dựng kho...</span>';
-
   const sigRows = pred.signals.map(s => {
     const isT = s.signal === "T";
-    const srcColor = s.source.includes("Dice") || s.source.includes("Chart Xúc") ? "#66ddaa" : "#8a6a30";
+    const isDice = s.source.includes("Dice") || s.source.includes("Sum");
+    const isNew  = ["Anti-Break","Momentum","Double Break","Block Pattern","Sum Markov"].includes(s.source);
+    const srcColor = isNew ? "#66eecc" : isDice ? "#66ddaa" : "#c8a040";
     return `<tr>
-      <td class="td-src" style="color:${srcColor}">${s.source}</td>
+      <td class="td-src" style="color:${srcColor}">${s.source}${isNew?' <span class="new-badge">NEW</span>':''}</td>
       <td class="${isT?"sig-t":"sig-x"}">${isT?"▲ Tài":"▼ Xỉu"}</td>
       <td class="td-wr">${(s.winRate*100).toFixed(0)}%</td>
       <td class="td-n">${s.sampleCount}</td>
       <td class="td-detail">${s.detail}</td>
     </tr>`;
-  }).join("") || `<tr><td colspan="5" style="color:#555;padding:8px;font-size:.78rem">Chưa đủ mẫu</td></tr>`;
+  }).join("") || `<tr><td colspan="5" style="color:#555;padding:8px;font-size:.78rem">Chưa đủ mẫu — đang tích lũy dữ liệu</td></tr>`;
 
-  const topDB = [...chartDB].filter(e => e.totalSeen >= 3)
+  const topDB = [...chartDB].filter(e => e.totalSeen >= 5)
     .sort((a,b) => b.totalSeen - a.totalSeen).slice(0, 6);
   const dbRows = topDB.map((e,i) => {
     const total = e.totalSeen;
-    const pT = e.winsT / total;
-    const pred2 = pT >= pT ? (e.winsT >= e.winsX ? "T" : "X") : "X";
+    const pred2 = e.winsT >= e.winsX ? "T" : "X";
     const wr = Math.max(e.winsT, e.winsX) / total;
     return `<tr>
       <td class="td-src">#${i+1}</td>
@@ -777,7 +874,7 @@ function buildHTML(pred, h) {
       <td class="td-wr">${(wr*100).toFixed(0)}%</td>
       <td class="td-n">${total}</td>
     </tr>`;
-  }).join("") || `<tr><td colspan="5" style="color:#555;font-size:.75rem;padding:6px">Đang xây dựng...</td></tr>`;
+  }).join("") || `<tr><td colspan="5" style="color:#555;font-size:.75rem;padding:6px">Đang xây dựng kho mẫu...</td></tr>`;
 
   const diceStatHTML = [0,1,2].map(di => {
     const ds = pred.diceStats[di];
@@ -790,12 +887,26 @@ function buildHTML(pred, h) {
     </div>`;
   }).join("");
 
+  // Algo health indicators
+  const algoNames = ["Markov-1","Markov-2","Markov-3","Anti-Break","Cầu Bệt","Cầu 1-1","Block Pattern","Cân Bằng","Momentum","Double Break","Chart Tổng","Dice Trend","Sum Markov"];
+  const activeAlgos = new Set(pred.signals.map(s => s.source));
+  const algoStatusHTML = algoNames.map(name => {
+    const active = activeAlgos.has(name);
+    const sig = pred.signals.find(s => s.source === name);
+    const col = !active ? "#333" : sig?.signal === "T" ? "#c8900a" : "#6010c0";
+    const border = !active ? "#222" : sig?.signal === "T" ? "#f5c842" : "#a070ff";
+    return `<div class="algo-pill" style="border-color:${border};background:${col}20">
+      <span style="color:${active?(sig?.signal==="T"?"#f5c842":"#a070ff"):"#444"}">${active?(sig?.signal==="T"?"▲":"▼"):"·"}</span>
+      <span style="color:${active?"#ccc":"#444"};font-size:.62rem">${name}</span>
+    </div>`;
+  }).join("");
+
   return `<!DOCTYPE html>
 <html lang="vi">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>SOI CẦU v11 — SUNWIN</title>
+<title>SOI CẦU v12 — SUNWIN</title>
 <link href="https://fonts.googleapis.com/css2?family=Rajdhani:wght@400;600;700&family=Share+Tech+Mono&display=swap" rel="stylesheet">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"><\/script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/chartjs-plugin-annotation/3.0.1/chartjs-plugin-annotation.min.js"><\/script>
@@ -803,29 +914,39 @@ function buildHTML(pred, h) {
 *{box-sizing:border-box;margin:0;padding:0}
 :root{
   --gold:#c8960a;--gl:#f5c842;--tai:#f5c842;--xiu:#a070ff;
-  --bg:#0d0900;--bg2:#160e03;--bg3:#1e1404;--bdr:rgba(180,130,10,.28);
-  --txt:#e8d8a0;--dim:#9a7a40;
+  --bg:#0a0800;--bg2:#120c02;--bg3:#1a1103;--bdr:rgba(180,130,10,.22);
+  --txt:#e8d8a0;--dim:#8a6a30;
   --d1:#f5a642;--d2:#42c8f5;--d3:#a0f542;
+  --new:#66eecc;
   --mono:'Share Tech Mono',monospace;--head:'Rajdhani',sans-serif;
 }
 body{background:var(--bg);min-height:100vh;color:var(--txt);font-family:var(--head);padding:10px}
+
+/* HEADER */
 .hdr{display:flex;align-items:center;justify-content:space-between;
-  background:linear-gradient(90deg,#1e0a00,#0f0600,#1e0a00);
-  border:1px solid var(--bdr);border-radius:10px;padding:10px 16px;margin-bottom:10px}
-.hdr-title{font-size:1.25rem;font-weight:700;letter-spacing:4px;
+  background:linear-gradient(135deg,#1a0800,#0a0400,#1a0800);
+  border:1px solid var(--bdr);border-radius:10px;padding:10px 16px;margin-bottom:10px;
+  box-shadow:0 2px 20px rgba(200,150,10,.08)}
+.hdr-title{font-size:1.2rem;font-weight:700;letter-spacing:4px;
   background:linear-gradient(90deg,#ffa500,#ffd700,#fff4a0,#ffd700,#ffa500);
   -webkit-background-clip:text;-webkit-text-fill-color:transparent}
-.hdr-right{font-family:var(--mono);font-size:.78rem;color:var(--dim);display:flex;gap:14px;align-items:center}
+.hdr-right{font-family:var(--mono);font-size:.76rem;color:var(--dim);display:flex;gap:12px;align-items:center;flex-wrap:wrap}
 .hdr-right .v{color:var(--gl);font-weight:bold}
 .hdr-right .ct{color:var(--tai)} .hdr-right .cx{color:var(--xiu)}
+
+/* METRICS */
 .metrics{display:grid;grid-template-columns:repeat(5,1fr);gap:8px;margin-bottom:10px}
 .mc{background:var(--bg2);border:1px solid var(--bdr);border-radius:8px;padding:10px 12px;position:relative;overflow:hidden}
 .mc::after{content:'';position:absolute;top:0;left:0;right:0;height:2px;background:var(--ac,var(--gold))}
-.mc-lbl{font-size:.60rem;color:var(--dim);text-transform:uppercase;letter-spacing:.8px;margin-bottom:4px}
-.mc-val{font-size:1.5rem;font-weight:700;font-family:var(--mono);color:var(--ac,var(--gl));line-height:1}
-.mc-sub{font-size:.62rem;color:var(--dim);margin-top:3px}
+.mc-lbl{font-size:.58rem;color:var(--dim);text-transform:uppercase;letter-spacing:.8px;margin-bottom:4px}
+.mc-val{font-size:1.45rem;font-weight:700;font-family:var(--mono);color:var(--ac,var(--gl));line-height:1}
+.mc-sub{font-size:.60rem;color:var(--dim);margin-top:3px}
+
+/* CARDS */
 .card{background:var(--bg2);border:1px solid var(--bdr);border-radius:10px;padding:12px;margin-bottom:10px}
-.card-title{font-size:.64rem;text-transform:uppercase;letter-spacing:1.5px;color:var(--dim);margin-bottom:10px}
+.card-title{font-size:.62rem;text-transform:uppercase;letter-spacing:1.5px;color:var(--dim);margin-bottom:10px}
+
+/* BEAD ROAD */
 .bead-road{display:flex;flex-wrap:wrap;gap:5px;padding:4px 0}
 .bead{width:26px;height:26px;border-radius:50%;display:flex;align-items:center;justify-content:center;
   font-family:var(--mono);font-size:.68rem;font-weight:700;position:relative}
@@ -833,61 +954,88 @@ body{background:var(--bg);min-height:100vh;color:var(--txt);font-family:var(--he
 .bx{background:radial-gradient(circle at 35% 30%,#c490ff,#7820ef,#3a0090);color:#e8d8ff;box-shadow:0 0 6px rgba(130,60,255,.5)}
 .bead-new::after{content:'';position:absolute;inset:-3px;border-radius:50%;border:2px solid #fff;opacity:.6;animation:blink 1s ease-in-out infinite}
 @keyframes blink{0%,100%{opacity:.2}50%{opacity:.8}}
+
+/* VOTE BAR */
 .vote-bar{display:flex;height:10px;border-radius:5px;overflow:hidden;background:rgba(255,255,255,.05);margin:6px 0}
 .vt{background:linear-gradient(90deg,#c8800a,#f5c842)}
 .vx{background:linear-gradient(90deg,#6010c0,#a070ff)}
 .vote-labels{display:flex;justify-content:space-between;font-family:var(--mono);font-size:.72rem}
+
+/* CONSENSUS BAR */
+.consensus-row{display:flex;align-items:center;gap:10px;margin:6px 0;font-family:var(--mono);font-size:.72rem}
+.consensus-bar{flex:1;height:8px;border-radius:4px;overflow:hidden;background:rgba(255,255,255,.05)}
+.consensus-fill{height:100%;border-radius:4px;background:linear-gradient(90deg,#ff6040,#ffaa40,#40ff80)}
+
+/* LAYOUT */
 .two-col{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:10px}
 .three-col{display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;margin-bottom:10px}
-.pred-row{display:grid;grid-template-columns:180px 1fr;gap:10px;margin-bottom:10px}
-.pred-main{background:${predBg};border:2px solid ${predColor};border-radius:12px;padding:16px;text-align:center;box-shadow:0 0 20px ${predColor}30}
-.pred-lbl{font-size:.62rem;color:var(--dim);text-transform:uppercase;letter-spacing:1px}
-.pred-val{font-size:3rem;font-weight:700;color:${predColor};text-shadow:0 0 20px ${predColor};line-height:1.1;margin:4px 0}
+.pred-row{display:grid;grid-template-columns:200px 1fr;gap:10px;margin-bottom:10px}
+
+/* PREDICTION CARD */
+.pred-main{background:${predBg};border:2px solid ${predColor};border-radius:12px;padding:16px;text-align:center;
+  box-shadow:0 0 30px ${predColor}25}
+.pred-lbl{font-size:.60rem;color:var(--dim);text-transform:uppercase;letter-spacing:1px}
+.pred-val{font-size:3rem;font-weight:700;color:${predColor};text-shadow:0 0 25px ${predColor};line-height:1.1;margin:4px 0}
 .conf-track{height:5px;background:rgba(255,255,255,.1);border-radius:3px;margin:6px 0;overflow:hidden}
 .conf-fill{height:100%;border-radius:3px;background:${predColor};width:${confPct}%}
-.bt-badge{display:inline-block;font-family:var(--mono);font-size:.65rem;padding:2px 8px;border-radius:4px;
-  background:rgba(100,220,100,.12);border:1px solid rgba(100,220,100,.25);color:#80dd80;margin-top:6px}
+.bt-badge{display:inline-block;font-family:var(--mono);font-size:.64rem;padding:2px 8px;border-radius:4px;
+  background:rgba(100,220,100,.12);border:1px solid rgba(100,220,100,.25);color:#80dd80;margin-top:4px}
+.no-signal-badge{display:inline-block;font-family:var(--mono);font-size:.64rem;padding:4px 10px;border-radius:6px;
+  background:rgba(255,200,80,.10);border:1px solid rgba(255,200,80,.3);color:#ffcc60;margin-top:4px}
+
+/* SIGNAL TABLE */
 .sig-table{width:100%;border-collapse:collapse;font-size:.68rem}
-.sig-table th{color:var(--dim);padding:3px 5px;border-bottom:1px solid var(--bdr);text-align:left;font-weight:400;font-size:.60rem;text-transform:uppercase}
-.sig-table td{padding:4px 5px;border-bottom:1px solid rgba(255,255,255,.04);vertical-align:top}
-.td-src{color:#8a6a30;font-family:var(--mono);font-size:.64rem;white-space:nowrap}
+.sig-table th{color:var(--dim);padding:4px 5px;border-bottom:1px solid var(--bdr);text-align:left;
+  font-weight:400;font-size:.58rem;text-transform:uppercase}
+.sig-table td{padding:4px 5px;border-bottom:1px solid rgba(255,255,255,.03);vertical-align:top}
+.td-src{font-family:var(--mono);font-size:.63rem;white-space:nowrap}
 .sig-t{color:var(--tai);font-weight:700;white-space:nowrap}
 .sig-x{color:var(--xiu);font-weight:700;white-space:nowrap}
 .td-wr{font-family:var(--mono);font-size:.72rem;color:#88cc88;text-align:right;white-space:nowrap}
-.td-n{font-family:var(--mono);font-size:.64rem;color:#666;text-align:right}
-.td-detail{color:#7a6040;font-size:.63rem;line-height:1.3}
-.algo-note{background:rgba(100,200,100,.05);border:1px solid rgba(100,200,100,.15);border-radius:8px;
-  padding:8px 12px;margin-bottom:10px;font-size:.70rem;color:#80bb80;line-height:1.6}
-.shape-info{display:flex;align-items:center;gap:10px;background:rgba(100,200,150,.08);
-  border:1px solid rgba(100,200,150,.2);border-radius:8px;padding:8px 12px;margin-bottom:10px;font-size:.72rem;color:#90cca8}
-.pdb{background:var(--bg2);border:1px solid rgba(100,200,150,.25);border-radius:10px;padding:12px;margin-bottom:10px}
-.pdb-title{font-size:.64rem;text-transform:uppercase;letter-spacing:1.5px;color:#60bb90;margin-bottom:8px;display:flex;justify-content:space-between;align-items:center}
-.db-stat-row{display:flex;gap:10px;font-family:var(--mono);font-size:.72rem}
-.db-stat{background:rgba(100,200,150,.08);border:1px solid rgba(100,200,150,.18);border-radius:5px;padding:3px 10px}
-.db-stat .v{color:#66ddaa;font-weight:bold}
-/* Dice stats */
+.td-n{font-family:var(--mono);font-size:.62rem;color:#555;text-align:right}
+.td-detail{color:#6a5030;font-size:.62rem;line-height:1.3}
+.new-badge{font-size:.50rem;background:rgba(100,238,200,.15);border:1px solid rgba(100,238,200,.35);
+  color:var(--new);padding:1px 4px;border-radius:3px;vertical-align:middle}
+
+/* ALGO STATUS */
+.algo-grid{display:flex;flex-wrap:wrap;gap:6px;padding:4px 0}
+.algo-pill{display:flex;align-items:center;gap:4px;padding:3px 8px;border-radius:5px;border:1px solid;
+  font-family:var(--mono)}
+
+/* SECTION HDR */
+.section-hdr{font-size:.58rem;text-transform:uppercase;letter-spacing:2px;color:#5a4010;
+  margin:12px 0 6px;padding-bottom:4px;border-bottom:1px solid rgba(160,110,30,.15)}
+
+/* DICE STATS */
 .dice-stats-row{display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-bottom:10px}
-.dstat{background:var(--bg2);border:1px solid rgba(255,255,255,.08);border-top:2px solid var(--dc,#888);border-radius:8px;padding:8px 10px}
-.dstat-lbl{font-size:.58rem;text-transform:uppercase;letter-spacing:1px;color:var(--dim);margin-bottom:2px}
-.dstat-avg{font-size:1.4rem;font-weight:700;font-family:var(--mono);line-height:1}
-.dstat-sub{font-size:.60rem;color:var(--dim);margin-bottom:6px}
-.dstat-hist{display:flex;align-items:flex-end;gap:3px;height:30px}
-.dv{display:flex;align-items:center;justify-content:center;min-width:18px;border-radius:2px 2px 0 0;font-size:.55rem;color:#000;font-family:var(--mono);font-weight:700;opacity:.85}
-/* Dice signal row */
-.dice-sig-row{display:flex;gap:8px;flex-wrap:wrap;padding:4px 0}
-.dice-sig-item{display:flex;gap:6px;align-items:center;font-family:var(--mono);font-size:.72rem;
-  padding:2px 8px;border-radius:4px;border:1px solid;background:rgba(100,200,150,.06)}
-.dice-sig-nil{font-family:var(--mono);font-size:.70rem;color:#555;padding:2px 8px}
-/* Section separator */
-.section-hdr{font-size:.60rem;text-transform:uppercase;letter-spacing:2px;color:#6a5020;
-  margin:14px 0 6px;padding-bottom:4px;border-bottom:1px solid rgba(160,110,30,.18)}
-@media(max-width:620px){.metrics,.dice-stats-row{grid-template-columns:repeat(2,1fr)}.pred-row,.two-col,.three-col{grid-template-columns:1fr}}
+.dstat{background:var(--bg2);border:1px solid rgba(255,255,255,.07);border-top:2px solid var(--dc,#888);border-radius:8px;padding:8px 10px}
+.dstat-lbl{font-size:.56rem;text-transform:uppercase;letter-spacing:1px;color:var(--dim);margin-bottom:2px}
+.dstat-avg{font-size:1.3rem;font-weight:700;font-family:var(--mono);line-height:1}
+.dstat-sub{font-size:.58rem;color:var(--dim);margin-bottom:6px}
+.dstat-hist{display:flex;align-items:flex-end;gap:3px;height:28px}
+.dv{display:flex;align-items:center;justify-content:center;min-width:18px;border-radius:2px 2px 0 0;
+  font-size:.55rem;color:#000;font-family:var(--mono);font-weight:700;opacity:.85}
+
+/* PATTERN DB */
+.pdb{background:var(--bg2);border:1px solid rgba(100,200,150,.2);border-radius:10px;padding:12px;margin-bottom:10px}
+.pdb-title{font-size:.62rem;text-transform:uppercase;letter-spacing:1.5px;color:#50aa80;
+  margin-bottom:8px;display:flex;justify-content:space-between;align-items:center}
+
+/* INFO NOTE */
+.info-note{background:rgba(100,200,100,.04);border:1px solid rgba(100,200,100,.12);border-radius:8px;
+  padding:8px 12px;margin-bottom:10px;font-size:.68rem;color:#70aa70;line-height:1.6}
+.info-note strong{color:#90cc90}
+
+@media(max-width:620px){
+  .metrics,.dice-stats-row{grid-template-columns:repeat(2,1fr)}
+  .pred-row,.two-col,.three-col{grid-template-columns:1fr}
+}
 </style>
 </head>
 <body>
 
 <div class="hdr">
-  <div class="hdr-title">⬦ SOI CẦU v11 — SUNWIN ⬦</div>
+  <div class="hdr-title">⬦ SOI CẦU v12 — SUNWIN ⬦</div>
   <div class="hdr-right">
     <span>Phiên <span class="v">#${h.phien}</span></span>
     <span class="${h.type==="T"?"ct":"cx"} v">${h.type==="T"?"Tài":"Xỉu"}</span>
@@ -897,17 +1045,14 @@ body{background:var(--bg);min-height:100vh;color:var(--txt);font-family:var(--he
   </div>
 </div>
 
-<div class="algo-note">
-  ⚡ <strong>v11 — Phân Tích 3 Xúc Xắc:</strong>
-  Markov(1/2/3) · Cầu Bệt · Xen Kẽ · N-gram(4/5) · Cân Bằng · Chart Tổng ·
-  <strong style="color:#66ddaa">Chart Xúc Xắc</strong> ·
-  <strong style="color:#66ddaa">Dice Markov</strong> ·
-  <strong style="color:#66ddaa">Dice Corr</strong> ·
-  <strong style="color:#66ddaa">Dice Trend</strong> |
-  <strong>${pred.signalCount}</strong> signal ·
-  Kho tổng: <strong style="color:#88ddaa">${pred.chartDBSize}</strong> ·
-  Kho D1/D2/D3: <strong style="color:#88ddaa">${pred.diceDBSizes.join("/")}</strong> ·
-  BT: <strong style="color:#aaffaa">${btWR}%</strong>
+<div class="info-note">
+  🛡 <strong>v12 — Cải Tiến Chống Gãy:</strong>
+  Decay Check trên tất cả Markov · <strong style="color:var(--new)">Anti-Break Markov</strong> (tự đảo khi đang gãy) ·
+  <strong style="color:var(--new)">Momentum</strong> (3 cửa sổ) ·
+  <strong style="color:var(--new)">Double Break</strong> ·
+  <strong style="color:var(--new)">Sum Markov</strong> (vùng tổng) ·
+  Consensus Filter (≥${CONSENSUS_MIN} đồng thuận) · Ngưỡng WR ≥ ${(MIN_WIN_RATE*100).toFixed(0)}% · Mẫu ≥ ${MIN_SAMPLES} ·
+  BT(bỏ qua khi không đủ): <strong style="color:#aaffaa">${btWR}%</strong> / ${btTotal} phiên (skip ${btSkip})
 </div>
 
 <div class="metrics">
@@ -931,71 +1076,44 @@ body{background:var(--bg);min-height:100vh;color:var(--txt);font-family:var(--he
     <div class="mc-val">${pred.streak}</div>
     <div class="mc-sub">${pred.curType==="T"?"Tài":"Xỉu"} liên tiếp</div>
   </div>
-  <div class="mc" style="--ac:#66ddaa">
-    <div class="mc-lbl">Kho Dice</div>
-    <div class="mc-val">${pred.diceDBSizes.reduce((a,b)=>a+b,0)}</div>
-    <div class="mc-sub">mẫu 3 xúc xắc</div>
+  <div class="mc" style="--ac:#66eecc">
+    <div class="mc-lbl">Consensus</div>
+    <div class="mc-val">${consensusPct}%</div>
+    <div class="mc-sub">${pred.cntT}T / ${pred.cntX}X signal</div>
   </div>
+</div>
+
+<div class="section-hdr">⬤ Trạng Thái Thuật Toán</div>
+<div class="card">
+  <div class="card-title">Hoạt động = màu · ▲ Tài · ▼ Xỉu · · = chưa đủ mẫu</div>
+  <div class="algo-grid">${algoStatusHTML}</div>
 </div>
 
 <div class="section-hdr">⬤ Phân Tích Từng Xúc Xắc</div>
-
-<div class="dice-stats-row">
-  ${diceStatHTML}
-</div>
-
-${pred.diceSig
-  ? `<div class="card" style="margin-bottom:10px">
-      <div class="card-title" style="color:#66ddaa">📊 Tín Hiệu Chart Xúc Xắc — ${pred.diceSig.signal==="T"?"▲ Tài":"▼ Xỉu"} WR=${(pred.diceSig.winRate*100).toFixed(0)}%</div>
-      <div class="dice-sig-row">${diceSigRows}</div>
-     </div>`
-  : `<div class="card" style="margin-bottom:10px;opacity:.5">
-      <div class="card-title" style="color:#66ddaa">📊 Chart Xúc Xắc — Đang xây dựng kho mẫu...</div>
-     </div>`}
+<div class="dice-stats-row">${diceStatHTML}</div>
 
 <div class="section-hdr">⬤ Đồ Thị 3 Xúc Xắc (25 Phiên)</div>
-
 <div class="three-col">
-  <div class="card" style="margin-bottom:0">
-    <div class="card-title" style="color:var(--d1)">🎲 Xúc Xắc 1</div>
-    <canvas id="d1Chart" height="160"></canvas>
-  </div>
-  <div class="card" style="margin-bottom:0">
-    <div class="card-title" style="color:var(--d2)">🎲 Xúc Xắc 2</div>
-    <canvas id="d2Chart" height="160"></canvas>
-  </div>
-  <div class="card" style="margin-bottom:0">
-    <div class="card-title" style="color:var(--d3)">🎲 Xúc Xắc 3</div>
-    <canvas id="d3Chart" height="160"></canvas>
-  </div>
+  <div class="card" style="margin-bottom:0"><div class="card-title" style="color:var(--d1)">🎲 Xúc Xắc 1</div><canvas id="d1Chart" height="160"></canvas></div>
+  <div class="card" style="margin-bottom:0"><div class="card-title" style="color:var(--d2)">🎲 Xúc Xắc 2</div><canvas id="d2Chart" height="160"></canvas></div>
+  <div class="card" style="margin-bottom:0"><div class="card-title" style="color:var(--d3)">🎲 Xúc Xắc 3</div><canvas id="d3Chart" height="160"></canvas></div>
 </div>
 
 <div class="section-hdr" style="margin-top:10px">⬤ Phân Bổ Tần Suất Xúc Xắc (50 Phiên)</div>
-
 <div class="three-col">
-  <div class="card" style="margin-bottom:0">
-    <div class="card-title" style="color:var(--d1)">Tần Suất D1</div>
-    <canvas id="freq1Chart" height="130"></canvas>
-  </div>
-  <div class="card" style="margin-bottom:0">
-    <div class="card-title" style="color:var(--d2)">Tần Suất D2</div>
-    <canvas id="freq2Chart" height="130"></canvas>
-  </div>
-  <div class="card" style="margin-bottom:0">
-    <div class="card-title" style="color:var(--d3)">Tần Suất D3</div>
-    <canvas id="freq3Chart" height="130"></canvas>
-  </div>
+  <div class="card" style="margin-bottom:0"><div class="card-title" style="color:var(--d1)">Tần Suất D1</div><canvas id="freq1Chart" height="120"></canvas></div>
+  <div class="card" style="margin-bottom:0"><div class="card-title" style="color:var(--d2)">Tần Suất D2</div><canvas id="freq2Chart" height="120"></canvas></div>
+  <div class="card" style="margin-bottom:0"><div class="card-title" style="color:var(--d3)">Tần Suất D3</div><canvas id="freq3Chart" height="120"></canvas></div>
 </div>
 
 <div class="section-hdr" style="margin-top:10px">⬤ Đồ Thị Tổng & Hình Dạng</div>
-
 <div class="two-col">
   <div class="card" style="margin-bottom:0">
     <div class="card-title">📈 Biểu Đồ Tổng + Bollinger Band</div>
     <canvas id="sumChart" height="220"></canvas>
   </div>
   <div class="card" style="margin-bottom:0">
-    <div class="card-title">📊 Hình Dạng Z-score (Tổng)</div>
+    <div class="card-title">📊 Hình Dạng Z-score (10 phiên)</div>
     <canvas id="shapeChart" height="220"></canvas>
   </div>
 </div>
@@ -1017,6 +1135,12 @@ ${pred.diceSig
     <span style="color:var(--tai)">▲ Tài ${pctT}% (${pred.votesT})</span>
     <span style="color:var(--xiu)">▼ Xỉu ${pctX}% (${pred.votesX})</span>
   </div>
+  <div class="consensus-row" style="margin-top:8px">
+    <span style="color:var(--dim);font-size:.65rem">Consensus</span>
+    <div class="consensus-bar"><div class="consensus-fill" style="width:${consensusPct}%"></div></div>
+    <span>${consensusPct}%</span>
+    <span style="color:${pred.cntT>pred.cntX?"var(--tai)":"var(--xiu)"};font-size:.72rem">${pred.cntT}T · ${pred.cntX}X</span>
+  </div>
 </div>
 
 <div class="pred-row">
@@ -1024,12 +1148,15 @@ ${pred.diceSig
     <div class="pred-lbl">Phiên Tiếp Theo</div>
     <div style="font-size:.7rem;color:var(--dim)">#${Number(h.phien)+1}</div>
     <div class="pred-val">${pred.nextDisplay}</div>
-    <div class="conf-track"><div class="conf-fill"></div></div>
-    <div style="font-family:var(--mono);font-size:1rem;color:#fff">${confPct}%</div>
-    <div class="bt-badge">Backtest: ${btWR}% / ${btTotal} phiên</div>
+    ${noSignal
+      ? `<div class="no-signal-badge">⚠ Không đủ đồng thuận — Nên chờ</div>`
+      : `<div class="conf-track"><div class="conf-fill"></div></div>
+         <div style="font-family:var(--mono);font-size:1rem;color:#fff">${confPct}%</div>`
+    }
+    <div class="bt-badge">Backtest: ${btWR}% / ${btTotal}p (skip ${btSkip})</div>
   </div>
   <div class="card" style="margin-bottom:0;overflow:hidden">
-    <div class="card-title">${pred.signalCount} tín hiệu đã qua backtest (WR &gt; 52%) — <span style="color:#66ddaa">xanh = dice</span></div>
+    <div class="card-title">${pred.signalCount} tín hiệu (WR≥${(MIN_WIN_RATE*100).toFixed(0)}%, N≥${MIN_SAMPLES}) — <span style="color:var(--new)">xanh = mới v12</span></div>
     <div style="max-height:300px;overflow-y:auto">
       <table class="sig-table">
         <thead><tr><th>Thuật Toán</th><th>Signal</th><th>WR%</th><th>N</th><th>Chi Tiết</th></tr></thead>
@@ -1042,10 +1169,7 @@ ${pred.diceSig
 <div class="pdb">
   <div class="pdb-title">
     <span>🗂 Kho Khuôn Mẫu Tổng</span>
-    <div class="db-stat-row">
-      <div class="db-stat">Tổng: <span class="v">${chartDB.length}</span></div>
-      <div class="db-stat">D1/D2/D3: <span class="v">${pred.diceDBSizes.join("/")}</span></div>
-    </div>
+    <span style="font-family:var(--mono);font-size:.70rem;color:#66ddaa">${chartDB.length} mẫu</span>
   </div>
   <div style="overflow-x:auto">
     <table class="sig-table">
@@ -1069,7 +1193,6 @@ const BOLL_UP  = ${bolUp};
 const BOLL_MID = ${bolMid};
 const BOLL_LOW = ${bolLow};
 
-// Bead road
 const beadEl = document.getElementById('beadRoad');
 [...TYPE_DATA].forEach((t,i) => {
   const b = document.createElement('div');
@@ -1078,7 +1201,6 @@ const beadEl = document.getElementById('beadRoad');
   beadEl.appendChild(b);
 });
 
-// Helper: make mini dice chart
 function makeDiceChart(id, data, color, label) {
   const ctx = document.getElementById(id).getContext('2d');
   new Chart(ctx, {
@@ -1092,108 +1214,88 @@ function makeDiceChart(id, data, color, label) {
         return color.replace(')',','+alpha+')').replace('rgb','rgba');
       }),
       pointBorderColor: color, pointBorderWidth: 1.5,
-      tension: 0.3, fill: {target:'origin', above: color.replace(')',',0.06)').replace('rgb','rgba')}
+      tension: 0.3, fill: {target:'origin', above: color.replace(')',',0.05)').replace('rgb','rgba')}
     }]},
     options: {
-      responsive: true, animation: {duration: 400},
-      layout: {padding: {top:8, bottom:4}},
-      scales: {
-        y: { min: 0.5, max: 6.5, ticks: {stepSize:1, color:'#7a6030', font:{size:10,family:'Share Tech Mono'}},
-             grid: {color:'rgba(160,110,30,.10)'}},
-        x: { ticks: {color:'#7a6030', maxTicksLimit:10, font:{size:8,family:'Share Tech Mono'}},
-             grid: {color:'rgba(160,110,30,.06)'}}
+      responsive:true, animation:{duration:400},
+      layout:{padding:{top:8,bottom:4}},
+      scales:{
+        y:{min:0.5,max:6.5,ticks:{stepSize:1,color:'#6a5020',font:{size:10,family:'Share Tech Mono'}},grid:{color:'rgba(160,110,30,.08)'}},
+        x:{ticks:{color:'#6a5020',maxTicksLimit:10,font:{size:8,family:'Share Tech Mono'}},grid:{color:'rgba(160,110,30,.05)'}}
       },
-      plugins: {
-        legend: {display:false},
-        annotation: {annotations:{
-          mid: {type:'line',scaleID:'y',value:3.5,borderColor:'rgba(255,255,255,.10)',borderWidth:1,borderDash:[4,4]}
-        }},
-        tooltip: {backgroundColor:'rgba(10,8,4,.95)',titleColor:'#ffd700',bodyColor:'#f0d0a0',
-          callbacks: {label: ctx => label + ': ' + ctx.parsed.y}}
+      plugins:{
+        legend:{display:false},
+        annotation:{annotations:{mid:{type:'line',scaleID:'y',value:3.5,borderColor:'rgba(255,255,255,.08)',borderWidth:1,borderDash:[4,4]}}},
+        tooltip:{backgroundColor:'rgba(8,6,2,.95)',titleColor:'#ffd700',bodyColor:'#f0d0a0',callbacks:{label:ctx=>label+': '+ctx.parsed.y}}
       }
     }
   });
 }
-
 makeDiceChart('d1Chart', D1_DATA, 'rgb(245,166,66)', 'D1');
 makeDiceChart('d2Chart', D2_DATA, 'rgb(66,200,245)', 'D2');
 makeDiceChart('d3Chart', D3_DATA, 'rgb(160,245,66)', 'D3');
 
-// Frequency bar charts
 function makeFreqChart(id, freqData, color) {
   const ctx = document.getElementById(id).getContext('2d');
   const total = freqData.reduce((a,b)=>a+b,0)||1;
   const pcts  = freqData.map(v => parseFloat((v/total*100).toFixed(1)));
   const expected = 100/6;
   new Chart(ctx, {
-    type: 'bar',
-    data: { labels: ['1','2','3','4','5','6'], datasets: [{
-      label: 'Tần suất %', data: pcts,
-      backgroundColor: pcts.map(p => p > expected+3 ? color : p < expected-3 ?
-        'rgba(255,100,100,.6)' : 'rgba(180,180,180,.3)'),
-      borderColor: color, borderWidth: 1.2, borderRadius: 3
+    type:'bar',
+    data:{labels:['1','2','3','4','5','6'],datasets:[{
+      label:'Tần suất %',data:pcts,
+      backgroundColor:pcts.map(p=>p>expected+3?color:p<expected-3?'rgba(255,100,100,.5)':'rgba(180,180,180,.25)'),
+      borderColor:color,borderWidth:1.2,borderRadius:3
     }]},
-    options: {
-      responsive: true, animation: {duration:300},
-      layout: {padding: {top:6}},
-      scales: {
-        y: { beginAtZero:true, ticks:{color:'#7a6030',font:{size:9,family:'Share Tech Mono'},callback:v=>v+'%'},
-             grid:{color:'rgba(160,110,30,.08)'}},
-        x: { ticks:{color:color,font:{size:10,family:'Share Tech Mono'}},
-             grid:{display:false}}
+    options:{
+      responsive:true,animation:{duration:300},layout:{padding:{top:6}},
+      scales:{
+        y:{beginAtZero:true,ticks:{color:'#6a5020',font:{size:9,family:'Share Tech Mono'},callback:v=>v+'%'},grid:{color:'rgba(160,110,30,.07)'}},
+        x:{ticks:{color:color,font:{size:10,family:'Share Tech Mono'}},grid:{display:false}}
       },
-      plugins: {
+      plugins:{
         legend:{display:false},
-        annotation:{annotations:{
-          exp:{type:'line',scaleID:'y',value:expected,borderColor:'rgba(255,255,255,.20)',borderWidth:1,borderDash:[4,4]}
-        }},
-        tooltip:{backgroundColor:'rgba(10,8,4,.95)',callbacks:{label:c=>c.parsed.y+'% ('+freqData[c.dataIndex]+' lần)'}}
+        annotation:{annotations:{exp:{type:'line',scaleID:'y',value:expected,borderColor:'rgba(255,255,255,.18)',borderWidth:1,borderDash:[4,4]}}},
+        tooltip:{backgroundColor:'rgba(8,6,2,.95)',callbacks:{label:c=>c.parsed.y+'% ('+freqData[c.dataIndex]+')'}}
       }
     }
   });
 }
+makeFreqChart('freq1Chart',FREQS[0],'#f5a642');
+makeFreqChart('freq2Chart',FREQS[1],'#42c8f5');
+makeFreqChart('freq3Chart',FREQS[2],'#a0f542');
 
-makeFreqChart('freq1Chart', FREQS[0], '#f5a642');
-makeFreqChart('freq2Chart', FREQS[1], '#42c8f5');
-makeFreqChart('freq3Chart', FREQS[2], '#a0f542');
-
-// Numbered-circle plugin for sum chart
-const numberedPts = {
+const numberedPts={
   id:'numberedPts',
   afterDatasetsDraw(chart){
-    const ctx = chart.ctx;
-    const meta = chart.getDatasetMeta(3);
-    if(!meta) return;
+    const ctx=chart.ctx;const meta=chart.getDatasetMeta(3);
+    if(!meta)return;
     meta.data.forEach((pt,i)=>{
-      const val = SUM_DATA[i];
-      if(val==null) return;
-      const isTai = val>=11, R=14;
-      ctx.save();
-      ctx.beginPath(); ctx.arc(pt.x+1.5,pt.y+2,R,0,Math.PI*2);
-      ctx.fillStyle='rgba(0,0,0,.4)'; ctx.fill(); ctx.restore();
+      const val=SUM_DATA[i];if(val==null)return;
+      const isTai=val>=11,R=14;
+      ctx.save();ctx.beginPath();ctx.arc(pt.x+1.5,pt.y+2,R,0,Math.PI*2);
+      ctx.fillStyle='rgba(0,0,0,.35)';ctx.fill();ctx.restore();
       const g=ctx.createRadialGradient(pt.x-R*.3,pt.y-R*.35,R*.05,pt.x,pt.y,R);
       if(isTai){g.addColorStop(0,'#ffe060');g.addColorStop(.45,'#c8900a');g.addColorStop(1,'#7a4f00');}
       else{g.addColorStop(0,'#c490ff');g.addColorStop(.45,'#7820ef');g.addColorStop(1,'#2a0060');}
-      ctx.save();
-      ctx.beginPath(); ctx.arc(pt.x,pt.y,R,0,Math.PI*2);
-      ctx.fillStyle=g; ctx.fill();
-      ctx.strokeStyle=isTai?'#f5c842':'#a070ff'; ctx.lineWidth=1.8; ctx.stroke(); ctx.restore();
-      ctx.save();
-      ctx.fillStyle='#fff'; ctx.font='bold 10px Share Tech Mono,monospace';
-      ctx.textAlign='center'; ctx.textBaseline='middle';
-      ctx.shadowColor='rgba(0,0,0,.8)'; ctx.shadowBlur=3;
-      ctx.fillText(val,pt.x,pt.y); ctx.restore();
+      ctx.save();ctx.beginPath();ctx.arc(pt.x,pt.y,R,0,Math.PI*2);
+      ctx.fillStyle=g;ctx.fill();
+      ctx.strokeStyle=isTai?'#f5c842':'#a070ff';ctx.lineWidth=1.5;ctx.stroke();ctx.restore();
+      ctx.save();ctx.fillStyle='#fff';ctx.font='bold 10px Share Tech Mono,monospace';
+      ctx.textAlign='center';ctx.textBaseline='middle';
+      ctx.shadowColor='rgba(0,0,0,.8)';ctx.shadowBlur=3;
+      ctx.fillText(val,pt.x,pt.y);ctx.restore();
     });
   }
 };
 
 new Chart(document.getElementById('sumChart').getContext('2d'),{
-  type:'line', plugins:[numberedPts],
+  type:'line',plugins:[numberedPts],
   data:{labels:LABELS,datasets:[
-    {label:'BB Upper',data:Array(N).fill(BOLL_UP),borderColor:'rgba(100,180,255,.22)',borderWidth:1,borderDash:[3,4],pointRadius:0,fill:false,tension:0,order:10},
-    {label:'BB Lower',data:Array(N).fill(BOLL_LOW),borderColor:'rgba(100,180,255,.22)',borderWidth:1,borderDash:[3,4],pointRadius:0,fill:{target:'-1',above:'rgba(100,180,255,.05)'},tension:0,order:10},
-    {label:'BB Mid',data:Array(N).fill(BOLL_MID),borderColor:'rgba(100,180,255,.13)',borderWidth:1,borderDash:[6,5],pointRadius:0,fill:false,tension:0,order:10},
-    {label:'Tổng',data:SUM_DATA,borderColor:'rgba(210,175,80,.75)',borderWidth:2.5,
+    {label:'BB Upper',data:Array(N).fill(BOLL_UP),borderColor:'rgba(100,180,255,.20)',borderWidth:1,borderDash:[3,4],pointRadius:0,fill:false,tension:0,order:10},
+    {label:'BB Lower',data:Array(N).fill(BOLL_LOW),borderColor:'rgba(100,180,255,.20)',borderWidth:1,borderDash:[3,4],pointRadius:0,fill:{target:'-1',above:'rgba(100,180,255,.04)'},tension:0,order:10},
+    {label:'BB Mid',data:Array(N).fill(BOLL_MID),borderColor:'rgba(100,180,255,.12)',borderWidth:1,borderDash:[6,5],pointRadius:0,fill:false,tension:0,order:10},
+    {label:'Tổng',data:SUM_DATA,borderColor:'rgba(210,175,80,.65)',borderWidth:2,
       pointRadius:16,pointHoverRadius:18,
       pointBackgroundColor:SUM_DATA.map(v=>v>=11?'#b07800':'#5010a0'),
       pointBorderColor:SUM_DATA.map(v=>v>=11?'#f5c842':'#a070ff'),
@@ -1201,47 +1303,44 @@ new Chart(document.getElementById('sumChart').getContext('2d'),{
   ]},
   options:{responsive:true,animation:{duration:500},layout:{padding:{top:18,bottom:6,left:4,right:4}},
     scales:{
-      y:{min:3,max:18,ticks:{color:'#9a7040',stepSize:3,font:{size:11,family:'Share Tech Mono'}},grid:{color:'rgba(160,110,30,.14)'}},
-      x:{ticks:{color:'#8a6030',maxTicksLimit:15,font:{size:9,family:'Share Tech Mono'}},grid:{color:'rgba(160,110,30,.08)'}}
+      y:{min:3,max:18,ticks:{color:'#8a6030',stepSize:3,font:{size:11,family:'Share Tech Mono'}},grid:{color:'rgba(160,110,30,.12)'}},
+      x:{ticks:{color:'#7a5020',maxTicksLimit:15,font:{size:9,family:'Share Tech Mono'}},grid:{color:'rgba(160,110,30,.07)'}}
     },
     plugins:{legend:{display:false},
       annotation:{annotations:{
-        mid:{type:'line',scaleID:'y',value:10.5,borderColor:'rgba(255,255,255,.10)',borderWidth:1,borderDash:[6,5]},
-        taiZ:{type:'box',scaleID:'y',yMin:11,yMax:18,backgroundColor:'rgba(245,200,66,.03)',borderWidth:0},
-        xiuZ:{type:'box',scaleID:'y',yMin:3,yMax:10.5,backgroundColor:'rgba(160,112,255,.03)',borderWidth:0},
+        mid:{type:'line',scaleID:'y',value:10.5,borderColor:'rgba(255,255,255,.08)',borderWidth:1,borderDash:[6,5]},
+        taiZ:{type:'box',scaleID:'y',yMin:11,yMax:18,backgroundColor:'rgba(245,200,66,.025)',borderWidth:0},
+        xiuZ:{type:'box',scaleID:'y',yMin:3,yMax:10.5,backgroundColor:'rgba(160,112,255,.025)',borderWidth:0},
       }},
-      tooltip:{backgroundColor:'rgba(10,8,4,.95)',titleColor:'#ffd700',bodyColor:'#f0d0a0',
+      tooltip:{backgroundColor:'rgba(8,6,2,.95)',titleColor:'#ffd700',bodyColor:'#f0d0a0',
         callbacks:{label:ctx=>{const v=ctx.parsed.y;if(ctx.dataset.label!=='Tổng')return ctx.dataset.label+': '+v.toFixed(1);return'Tổng: '+v+' → '+(v>=11?'🟡 Tài':'🟣 Xỉu');}}}
     }
   }
 });
 
-// Shape chart
 (function(){
-  const raw=SUM_DATA.slice(-10);
-  if(raw.length<2)return;
+  const raw=SUM_DATA.slice(-10);if(raw.length<2)return;
   const m=raw.reduce((s,v)=>s+v,0)/raw.length;
   const sd=Math.sqrt(raw.reduce((s,v)=>s+(v-m)**2,0)/raw.length)||1;
   const norm=raw.map(v=>(v-m)/sd);
-  const shapeLabels=raw.map((_,i)=>String(i+1));
   new Chart(document.getElementById('shapeChart').getContext('2d'),{
     type:'line',
-    data:{labels:shapeLabels,datasets:[{
+    data:{labels:raw.map((_,i)=>String(i+1)),datasets:[{
       label:'Z-score',data:norm,
-      borderColor:'rgba(100,220,150,.85)',borderWidth:2.5,
-      pointRadius:norm.map((_,i)=>i===norm.length-1?8:5),
-      pointBackgroundColor:norm.map((v,i)=>i===norm.length-1?'#44ff88':v>=0?'rgba(245,200,66,.8)':'rgba(160,112,255,.8)'),
-      pointBorderColor:'#333',pointBorderWidth:1,tension:.35,
-      fill:{target:'origin',above:'rgba(245,200,66,.07)',below:'rgba(160,112,255,.07)'}
+      borderColor:'rgba(100,220,150,.8)',borderWidth:2.5,
+      pointRadius:norm.map((_,i)=>i===norm.length-1?8:4),
+      pointBackgroundColor:norm.map((v,i)=>i===norm.length-1?'#44ff88':v>=0?'rgba(245,200,66,.75)':'rgba(160,112,255,.75)'),
+      pointBorderColor:'#222',pointBorderWidth:1,tension:.35,
+      fill:{target:'origin',above:'rgba(245,200,66,.06)',below:'rgba(160,112,255,.06)'}
     }]},
     options:{responsive:true,animation:{duration:600},layout:{padding:{top:12,bottom:6}},
       scales:{
-        y:{ticks:{color:'#6a8a70',font:{size:10,family:'Share Tech Mono'}},grid:{color:'rgba(100,200,120,.10)'},title:{display:true,text:'Z-score',color:'#507050',font:{size:10}}},
-        x:{ticks:{color:'#507050',font:{size:10,family:'Share Tech Mono'}},grid:{color:'rgba(100,200,120,.06)'},title:{display:true,text:'Phiên (cũ→mới)',color:'#507050',font:{size:10}}}
+        y:{ticks:{color:'#5a7a60',font:{size:10,family:'Share Tech Mono'}},grid:{color:'rgba(100,200,120,.08)'},title:{display:true,text:'Z-score',color:'#456050',font:{size:10}}},
+        x:{ticks:{color:'#456050',font:{size:10,family:'Share Tech Mono'}},grid:{color:'rgba(100,200,120,.05)'},title:{display:true,text:'Phiên (cũ→mới)',color:'#456050',font:{size:10}}}
       },
       plugins:{legend:{display:false},
-        annotation:{annotations:{zero:{type:'line',scaleID:'y',value:0,borderColor:'rgba(255,255,255,.15)',borderWidth:1,borderDash:[4,4]}}},
-        tooltip:{backgroundColor:'rgba(10,20,12,.95)',callbacks:{label:ctx=>{const v=ctx.parsed.y;return'Z: '+(v>=0?'+':'')+v.toFixed(2)+' ('+(v>=0?'Tài':'Xỉu')+')';}}}
+        annotation:{annotations:{zero:{type:'line',scaleID:'y',value:0,borderColor:'rgba(255,255,255,.12)',borderWidth:1,borderDash:[4,4]}}},
+        tooltip:{backgroundColor:'rgba(5,15,8,.95)',callbacks:{label:ctx=>{const v=ctx.parsed.y;return'Z: '+(v>=0?'+':'')+v.toFixed(2)+' ('+(v>=0?'Tài':'Xỉu')+')';}}}
       }
     }
   });
@@ -1290,10 +1389,12 @@ http.createServer(async (req, res) => {
       ket_qua_hien: h.type==="T"?"Tài":"Xỉu",
       phien_du_doan: String(Number(h.phien)+1),
       du_doan: p.nextDisplay, do_tin_cay: p.confDisplay,
+      consensus: Math.round((p.consensus||0)*100)+"%",
+      signal_count_T: p.cntT, signal_count_X: p.cntX,
       backtest_winrate: p.backtest?.wr ?? null,
-      signal_count: p.signalCount, current_shape: p.currentShape,
-      chart_db_size: p.chartDBSize, dice_db_sizes: p.diceDBSizes,
-      ver: "v11"
+      signal_count: p.signalCount,
+      chart_db_size: p.chartDBSize,
+      ver: "v12"
     })); return;
   }
 
@@ -1303,10 +1404,10 @@ http.createServer(async (req, res) => {
     res.writeHead(200);
     res.end(JSON.stringify({
       du_doan: p.nextDisplay, do_tin_cay: p.confDisplay,
+      consensus: p.consensus, cntT: p.cntT, cntX: p.cntX,
       backtest: p.backtest, signals: p.signals, streak: p.streak,
-      chart_signal: p.chartSignal, dice_signal: p.diceSig,
-      dice_stats: p.diceStats, chart_db_size: p.chartDBSize,
-      dice_db_sizes: p.diceDBSizes, ver: "v11"
+      chart_signal: p.chartSignal, dice_stats: p.diceStats,
+      chart_db_size: p.chartDBSize, ver: "v12"
     })); return;
   }
 
@@ -1319,6 +1420,7 @@ http.createServer(async (req, res) => {
       phien_hien_tai: Number(h.phien), ket_qua: h.type === "T" ? "Tai" : "Xiu",
       xuc_xac: h.dice, phien_du_doan: Number(h.phien) + 1,
       du_doan: p.next === "T" ? "Tai" : "Xiu", do_tin_cay: p.confDisplay,
+      consensus: Math.round((p.consensus||0)*100)+"%",
       pattern, id: "@sewdangcap"
     })); return;
   }
@@ -1335,25 +1437,8 @@ http.createServer(async (req, res) => {
     })); return;
   }
 
-  if (url.pathname === "/dice/analysis") {
-    if (!history.length) { noData(); return; }
-    const freqs = diceFreqAnalysis(history, 50);
-    const p = predict(history);
-    res.writeHead(200);
-    res.end(JSON.stringify({
-      freq_50_phien: [0,1,2].map(di => ({
-        xuc_xac: di+1,
-        gia_tri: [1,2,3,4,5,6].map((v,i) => ({gia_tri: v, so_lan: freqs[di][i]}))
-      })),
-      dice_db_sizes: p.diceDBSizes,
-      dice_stats: p.diceStats,
-      dice_signal: p.diceSig,
-      ver: "v11"
-    }, null, 2)); return;
-  }
-
   if (url.pathname === "/patterns") {
-    const top = [...chartDB].filter(e => e.totalSeen >= 2)
+    const top = [...chartDB].filter(e => e.totalSeen >= 5)
       .sort((a,b) => b.totalSeen - a.totalSeen).slice(0, 20)
       .map((e,i) => {
         const total = e.totalSeen;
@@ -1374,22 +1459,29 @@ http.createServer(async (req, res) => {
   res.writeHead(404);
   res.end(JSON.stringify({
     loi: "Không tìm thấy",
-    endpoints: ["/predict","/predict/detail","/history","/bando","/sunlon","/patterns","/dice/analysis","/debug"],
-    ver: "v11"
+    endpoints: ["/predict","/predict/detail","/history","/bando","/sunlon","/patterns","/debug"],
+    ver: "v12"
   }));
 
 }).listen(PORT, () => {
-  console.log(`✅  SicBo v11.0 — Phân Tích 3 Xúc Xắc — port ${PORT}`);
+  console.log(`✅  SicBo v12.0 — Chống Gãy & Consensus Filter — port ${PORT}`);
   console.log(`    Dashboard   : http://localhost:${PORT}/bando`);
   console.log(`    API         : http://localhost:${PORT}/predict`);
-  console.log(`    Dice Anal.  : http://localhost:${PORT}/dice/analysis`);
   console.log(`    Patterns    : http://localhost:${PORT}/patterns`);
   console.log(`    Algorithms:`);
-  console.log(`      [Cũ]  Markov(1/2/3), Cầu Bệt, Xen Kẽ, N-gram(4/5), Cân Bằng, Chart Tổng`);
-  console.log(`      [Mới] Chart Xúc Xắc — z-norm Pearson trên từng D1/D2/D3`);
-  console.log(`      [Mới] Dice Markov   — Thấp/Trung/Cao Markov từng xúc xắc`);
-  console.log(`      [Mới] Dice Corr     — Tổ hợp 3 xúc xắc (8 nhóm)`);
-  console.log(`      [Mới] Dice Trend    — Slope↑↓→ từng xúc xắc trong 5 phiên`);
+  console.log(`      Markov(1/2/3) + Decay Check   ← chống gãy`);
+  console.log(`      Anti-Break Markov              ← TỰ ĐẢO khi đang gãy liên tục`);
+  console.log(`      Cầu Bệt + Decay Check          ← chống gãy`);
+  console.log(`      Cầu Xen Kẽ`);
+  console.log(`      Block Pattern (thay N-gram)    ← chính xác hơn`);
+  console.log(`      Cân Bằng (Mean Reversion)`);
+  console.log(`      Momentum (5/10/20 phiên)       ← MỚI`);
+  console.log(`      Double After Break             ← MỚI`);
+  console.log(`      Chart Tổng (Pearson+Bollinger) ← ngưỡng 0.82`);
+  console.log(`      Dice Trend (slope 3 xúc xắc)`);
+  console.log(`      Sum Markov (vùng tổng)         ← MỚI, thay DiceGroupMarkov`);
+  console.log(`      Consensus Filter: ≥${CONSENSUS_MIN} đồng thuận mới ra kết quả`);
+  console.log(`      WR ngưỡng: ≥${(MIN_WIN_RATE*100).toFixed(0)}%  Mẫu ngưỡng: ≥${MIN_SAMPLES}`);
   syncHistory();
   setInterval(syncHistory, 12000);
 });
