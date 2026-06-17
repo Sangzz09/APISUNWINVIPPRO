@@ -2,7 +2,7 @@
 const https = require("https");
 const http  = require("http");
 
-const SOURCE_URL  = "https://apilichsusunwinsew.onrender.com/api/taixiu/history?limit=50";
+const SOURCE_URL  = "http://36.50.134.206:5000/api/taixiu/history";
 const PORT        = process.env.PORT || 3000;
 const HISTORY_MAX = 800;
 
